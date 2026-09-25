@@ -113,54 +113,59 @@ function layers(doc: DxfDoc): Layer[] {
 }
 
 
+/** Copies everything the renderer needs out of `doc`, then frees it: the WASM copy is never read again. */
 function vectorDocument(doc: DxfDoc): VectorDocument {
-  const paths = strokes(doc);
-  const labels = texts(doc);
-  const layerList = layers(doc);
-  return {
-    kind: 'vector',
-    width: doc.width,
-    height: doc.height,
-    units: doc.units,
-    pageCount: 1,
-    info: infoRows(doc.info()),
-    layers: layerList,
-    draw(ctx, view, invert) {
-      const { scale, x, y } = view;
-      const { width, height } = ctx.canvas;
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.fillStyle = invert ? '#000' : '#fff';
-      ctx.fillRect(0, 0, width, height);
+  try {
+    const paths = strokes(doc);
+    const labels = texts(doc);
+    const layerList = layers(doc);
+    return {
+      kind: 'vector',
+      width: doc.width,
+      height: doc.height,
+      units: doc.units,
+      pageCount: 1,
+      info: infoRows(doc.info()),
+      layers: layerList,
+      draw(ctx, view, invert) {
+        const { scale, x, y } = view;
+        const { width, height } = ctx.canvas;
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.fillStyle = invert ? '#000' : '#fff';
+        ctx.fillRect(0, 0, width, height);
 
-      // Hairlines: one device pixel wide at any zoom.
-      ctx.setTransform(scale, 0, 0, scale, -x * scale, -y * scale);
-      ctx.lineWidth = 1 / scale;
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      for (const [layer, byColor] of paths) {
-        if (!layerList[layer].visible) continue;
-        for (const [color, path] of byColor) {
-          ctx.strokeStyle = css(color, invert);
-          ctx.stroke(path);
+        // Hairlines: one device pixel wide at any zoom.
+        ctx.setTransform(scale, 0, 0, scale, -x * scale, -y * scale);
+        ctx.lineWidth = 1 / scale;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        for (const [layer, byColor] of paths) {
+          if (!layerList[layer].visible) continue;
+          for (const [color, path] of byColor) {
+            ctx.strokeStyle = css(color, invert);
+            ctx.stroke(path);
+          }
         }
-      }
 
-      for (const t of labels) {
-        const px = t.height * scale;
-        const sx = (t.x - x) * scale;
-        const sy = (t.y - y) * scale;
-        const reach = t.reach * scale;
-        if (!layerList[t.layer].visible || px < MIN_TEXT_PX || sx < -reach || sy < -reach || sx > width + reach || sy > height + reach) continue;
-        ctx.setTransform(...t.matrix, sx, sy);
-        ctx.font = `${px * EM_PER_CAP}px sans-serif`;
-        ctx.textAlign = t.align;
-        ctx.textBaseline = t.baseline;
-        ctx.fillStyle = css(t.color, invert);
-        t.lines.forEach((line, i) => ctx.fillText(line, 0, (i - t.shift) * px * LINE_SPACING));
-      }
-    },
-    free: () => doc.free(),
-  };
+        for (const t of labels) {
+          const px = t.height * scale;
+          const sx = (t.x - x) * scale;
+          const sy = (t.y - y) * scale;
+          const reach = t.reach * scale;
+          if (!layerList[t.layer].visible || px < MIN_TEXT_PX || sx < -reach || sy < -reach || sx > width + reach || sy > height + reach) continue;
+          ctx.setTransform(...t.matrix, sx, sy);
+          ctx.font = `${px * EM_PER_CAP}px sans-serif`;
+          ctx.textAlign = t.align;
+          ctx.textBaseline = t.baseline;
+          ctx.fillStyle = css(t.color, invert);
+          t.lines.forEach((line, i) => ctx.fillText(line, 0, (i - t.shift) * px * LINE_SPACING));
+        }
+      },
+      free: () => {},
+    };
+  } finally {
+    doc.free();
+  }
 }
 
 export const dxf: FormatPlugin = {
