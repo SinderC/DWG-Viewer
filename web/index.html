@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Drawing Viewer</title>
+    <style>
+      :root {
+        --bg: #32363a;
+        --bar: #1f2226;
+        --fg: #e6e6e6;
+        --muted: #9aa0a6;
+        --accent: #4c8dff;
+        --error: #ff6b6b;
+        color-scheme: dark;
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; margin: 0; }
+      body {
+        display: flex;
+        flex-direction: column;
+        background: var(--bg);
+        color: var(--fg);
+        font: 13px/1.4 system-ui, sans-serif;
+        user-select: none;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 6px 8px;
+        background: var(--bar);
+      }
+      button, label.button {
+        min-width: 32px;
+        height: 28px;
+        padding: 0 10px;
+        border: 1px solid #3c4046;
+        border-radius: 4px;
+        background: #2a2d32;
+        color: var(--fg);
+        font: inherit;
+        line-height: 26px;
+        cursor: pointer;
+      }
+      button:hover:not(:disabled), label.button:hover { background: #353940; }
+      button:disabled { opacity: 0.4; cursor: default; }
+      button[aria-pressed='true'] { background: var(--accent); border-color: var(--accent); color: #fff; }
+      label.button { margin-right: 8px; }
+      #zoom { min-width: 52px; text-align: center; color: var(--muted); font-variant-numeric: tabular-nums; }
+      #pager:not([hidden]) { display: flex; align-items: center; gap: 4px; margin-left: 8px; }
+      #page { min-width: 52px; text-align: center; color: var(--muted); font-variant-numeric: tabular-nums; }
+      #status { flex: 1; margin-left: 8px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted); }
+      #status.error { color: var(--error); }
+      #repo { display: flex; margin: 0 4px 0 8px; color: var(--muted); }
+      #repo:hover { color: var(--fg); }
+      #workspace { display: flex; flex: 1; min-height: 0; }
+      main { position: relative; flex: 1; min-width: 0; }
+      #layers-panel {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        width: 240px;
+        padding: 8px;
+        background: var(--bar);
+        border-left: 1px solid #3c4046;
+      }
+      #layers-panel[hidden] { display: none; }
+      #layers-panel .row { display: flex; gap: 4px; }
+      #layers-panel .row button { flex: 1; }
+      #layer-filter {
+        height: 28px;
+        padding: 0 8px;
+        border: 1px solid #3c4046;
+        border-radius: 4px;
+        background: #2a2d32;
+        color: var(--fg);
+        font: inherit;
+      }
+      #layer-list { flex: 1; min-height: 0; overflow-y: auto; }
+      #layer-list label { display: flex; align-items: center; gap: 6px; padding: 2px 0; cursor: pointer; }
+      #layer-list label[hidden] { display: none; }
+      #layer-list span:last-child { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+      .swatch { flex: none; width: 10px; height: 10px; border: 1px solid #0006; border-radius: 2px; }
+      #layers-panel .hint { color: var(--muted); font-size: 12px; }
+      canvas { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
+      canvas.dragging { cursor: grabbing; }
+      #hint {
+        position: absolute;
+        inset: 24px;
+        display: grid;
+        place-items: center;
+        border: 2px dashed #4a4f56;
+        border-radius: 8px;
+        color: var(--muted);
+        font-size: 15px;
+        pointer-events: none;
+      }
+      #hint[hidden] { display: none; }
+      body.drop main { outline: 3px solid var(--accent); outline-offset: -3px; }
+      dialog {
+        max-width: min(640px, calc(100vw - 32px));
+        max-height: 80vh;
+        padding: 0;
+        border: 1px solid #3c4046;
+        border-radius: 8px;
+        background: var(--bar);
+        color: var(--fg);
+        user-select: text;
+      }
+      dialog::backdrop { background: rgb(0 0 0 / 0.5); }
+      dialog form { display: flex; flex-direction: column; padding: 16px; }
+      dialog h2 { margin: 0 0 12px; font-size: 15px; font-weight: 600; }
+      dialog table { border-collapse: collapse; }
+      dialog th { padding: 3px 16px 3px 0; color: var(--muted); font-weight: normal; text-align: left; vertical-align: top; white-space: nowrap; }
+      dialog td { padding: 3px 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+      dialog form button { align-self: flex-end; margin-top: 12px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <label class="button" for="file">Open…</label>
+      <input id="file" type="file" hidden />
+      <button id="zoom-out" title="Zoom out">−</button>
+      <span id="zoom">–</span>
+      <button id="zoom-in" title="Zoom in">+</button>
+      <button id="fit" title="Fit to window (double-click)">Fit</button>
+      <button id="actual" title="Actual pixels">1:1</button>
+      <button id="invert" title="Swap black and white (DXF/DWG: black background)" aria-pressed="false">Invert</button>
+      <button id="info" title="File information" disabled>Info</button>
+      <button id="layers" title="Show or hide layers" aria-pressed="false" hidden>Layers</button>
+      <span id="pager" hidden>
+        <button id="prev-page" title="Previous page">‹</button>
+        <span id="page"></span>
+        <button id="next-page" title="Next page">›</button>
+      </span>
+      <span id="status">Files are opened locally and never leave this computer.</span>
+      <a id="repo" href="https://github.com/SinderC/DWG-Viewer" target="_blank" rel="noopener" title="Source on GitHub" aria-label="Source on GitHub">
+        <svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/></svg>
+      </a>
+    </header>
+    <dialog id="info-dialog" aria-labelledby="info-title">
+      <form method="dialog">
+        <h2 id="info-title">File information</h2>
+        <table id="info-table"></table>
+        <button>Close</button>
+      </form>
+    </dialog>
+    <div id="workspace">
+      <main>
+        <canvas id="canvas"></canvas>
+        <div id="hint">Open a CALS, TIFF, DXF or DWG file or drop it here<br />Wheel: zoom · Drag: pan · Double-click: fit</div>
+      </main>
+      <aside id="layers-panel" hidden>
+        <input id="layer-filter" type="search" placeholder="Filter layers" aria-label="Filter layers" />
+        <div class="row">
+          <button id="layers-on">All on</button>
+          <button id="layers-off">All off</button>
+        </div>
+        <div id="layer-list"></div>
+        <div class="hint">Alt-click: show only that layer</div>
+      </aside>
+    </div>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>

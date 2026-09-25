@@ -1,0 +1,12 @@
+[workspace]
+members = ["crates/raster"]
+resolver = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+# DWG decoding runs once per file; optimising acadrust for size keeps the single-file build small.
+[profile.release.package.acadrust]
+opt-level = "z"
