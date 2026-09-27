@@ -25,6 +25,14 @@ const layerFilter = $<HTMLInputElement>('layer-filter');
 const layerList = $('layer-list');
 
 fileInput.accept = plugins.flatMap((p) => p.extensions.map((e) => `.${e}`)).join(',');
+$('formats').replaceChildren(
+  ...plugins.map((p) => {
+    const item = document.createElement('li');
+    item.textContent = p.name;
+    item.appendChild(document.createElement('span')).textContent = p.extensions.map((e) => `.${e}`).join(' ');
+    return item;
+  }),
+);
 
 const viewer = new Viewer($<HTMLCanvasElement>('canvas'), (view) => {
   zoomLabel.textContent = `${Math.round(view.scale * 100)}%`;
