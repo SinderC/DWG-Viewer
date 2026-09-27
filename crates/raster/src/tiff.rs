@@ -17,6 +17,16 @@ pub enum Image {
     Color(RgbaImage),
 }
 
+impl Image {
+    /// Width and height in pixels.
+    pub fn size(&self) -> (u32, u32) {
+        match self {
+            Image::Bilevel(b) => (b.width, b.height),
+            Image::Color(c) => (c.width, c.height),
+        }
+    }
+}
+
 type TiffDecoder<'a> = Decoder<Cursor<&'a [u8]>>;
 
 fn err(e: TiffError) -> String {

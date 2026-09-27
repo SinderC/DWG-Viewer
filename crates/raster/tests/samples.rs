@@ -1,4 +1,4 @@
-//! Decodes every file in ./samples (CALS, TIFF, DXF, DWG) (git-ignored). Run with `cargo test --release -- --ignored --nocapture`.
+//! Decodes every file in ./samples (CALS, TIFF, DXF, DWG, HP-GL) (git-ignored). Run with `cargo test --release -- --ignored --nocapture`.
 
 use std::time::Instant;
 
@@ -17,22 +17,36 @@ fn decode(data: &[u8], is_tiff: bool, page: u32) -> Result<(Image, String), Stri
     }
 }
 
+/// Files in `dir` and its subdirectories, without hidden ones (.DS_Store).
+fn files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let entries = std::fs::read_dir(dir).expect("samples/ directory").flatten().filter(|e| !e.file_name().to_string_lossy().starts_with('.')).map(|e| e.path());
+    entries.flat_map(|p| if p.is_dir() { files(&p) } else { vec![p] }).collect()
+}
+
 #[test]
 #[ignore]
 fn decode_samples() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../samples");
-    let mut entries: Vec<_> = std::fs::read_dir(dir).expect("samples/ directory").flatten().map(|e| e.path()).collect();
+    let mut entries = files(dir.as_ref());
     entries.sort();
     let mut failures = 0;
     for path in entries.iter().filter(|p| p.is_file()) {
         let data = std::fs::read(path).unwrap();
         let vector = |ext: &str| path.extension().is_some_and(|e| e.eq_ignore_ascii_case(ext));
-        if vector("dxf") || vector("dwg") {
+        let hpgl = ["plt", "hpgl", "hpg", "hgl", "plo", "rtl"].iter().any(|e| vector(e));
+        if vector("dxf") || vector("dwg") || hpgl {
             let start = Instant::now();
-            match if vector("dwg") { raster::dwg::decode(&data) } else { raster::dxf::decode(&data) } {
+            let decoded = if hpgl {
+                raster::hpgl::decode(&data, 0).map(|(d, _)| d)
+            } else if vector("dwg") {
+                raster::dwg::decode(&data)
+            } else {
+                raster::dxf::decode(&data)
+            };
+            match decoded {
                 Ok(d) => println!(
-                    "{}: {:.6} × {:.6} {}, {} paths, {} arcs, {} texts, decode {:?}",
-                    path.display(), d.width, d.height, d.units, d.paths.len(), d.arcs.len(), d.texts.len(), start.elapsed()
+                    "{}: {:.6} × {:.6} {}, {} paths, {} arcs, {} texts, {} fills, {} images, decode {:?}\n    {:?}",
+                    path.display(), d.width, d.height, d.units, d.paths.len(), d.arcs.len(), d.texts.len(), d.fills.len(), d.images.len(), start.elapsed(), d.info
                 ),
                 Err(e) => {
                     failures += 1;

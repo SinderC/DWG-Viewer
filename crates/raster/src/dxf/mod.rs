@@ -6,7 +6,7 @@
 //! flattened. Output coordinates are relative to the top-left of the drawing extents with Y down,
 //! like image pixels, which keeps them small enough for the canvas' single-precision paths.
 //!
-//! The output side (`World`, `Affine`, `style`, text and spline helpers) is shared with `dwg`.
+//! The output side (`World`, `Affine`, `style`, text and spline helpers) is shared with `dwg` and `hpgl`.
 
 mod color;
 pub(crate) mod parse;
@@ -15,8 +15,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::f64::consts::TAU;
 
 pub(crate) use color::aci;
-pub use color::FOREGROUND;
+pub use color::{BACKGROUND, FOREGROUND};
 use parse::{Pair, Record};
+
+use crate::tiff::Image;
 
 pub(crate) type P = [f64; 2];
 
@@ -28,6 +30,8 @@ const SPLINE_STEPS: usize = 16;
 pub struct Path {
     pub points: Vec<P>,
     pub color: u32,
+    /// Line width in drawing units; 0 is a hairline.
+    pub width: f64,
     /// Index into `Drawing::layers`.
     pub layer: u32,
 }
@@ -40,6 +44,8 @@ pub struct Arc {
     pub t0: f64,
     pub t1: f64,
     pub color: u32,
+    /// Line width in drawing units; 0 is a hairline.
+    pub width: f64,
     /// Index into `Drawing::layers`.
     pub layer: u32,
 }
@@ -60,6 +66,24 @@ pub struct Text {
     pub layer: u32,
 }
 
+/// A filled area: the rings are subpaths of one shape, filled with the even-odd or non-zero rule.
+pub struct Fill {
+    pub rings: Vec<Vec<P>>,
+    pub even_odd: bool,
+    pub color: u32,
+    /// Index into `Drawing::layers`.
+    pub layer: u32,
+}
+
+/// A raster image placed in the drawing: `pos` is its top-left corner, `px` the size of a pixel in drawing units.
+pub struct PlacedImage {
+    pub image: Image,
+    pub pos: P,
+    pub px: f64,
+    /// Index into `Drawing::layers`.
+    pub layer: u32,
+}
+
 pub struct Drawing {
     pub width: f64,
     pub height: f64,
@@ -70,17 +94,20 @@ pub struct Drawing {
     pub paths: Vec<Path>,
     pub arcs: Vec<Arc>,
     pub texts: Vec<Text>,
+    pub fills: Vec<Fill>,
+    pub images: Vec<PlacedImage>,
     /// Layers in name order, with their visibility as saved in the file.
     pub layers: Vec<Layer>,
     /// File properties as (label, value) rows for display.
     pub info: Vec<(String, String)>,
 }
 
-/// Colour and layer of a shape.
+/// Colour, layer and line width (in drawing units, 0 = hairline) of a shape.
 #[derive(Clone, Copy)]
 pub(crate) struct Pen {
     pub color: u32,
     pub layer: u32,
+    pub width: f64,
 }
 
 /// Parses an ASCII DXF file and expands its model space.
@@ -171,6 +198,8 @@ pub(crate) struct World<'a> {
     paths: Vec<Path>,
     arcs: Vec<Arc>,
     texts: Vec<Text>,
+    fills: Vec<Fill>,
+    images: Vec<PlacedImage>,
     /// Entity types that are not drawn, with how often they occur (block contents once per insert).
     skipped: BTreeMap<&'a str, usize>,
     layers: Vec<Layer>,
@@ -184,17 +213,22 @@ impl<'a> World<'a> {
         layers.sort_by_cached_key(|l| l.name.to_uppercase());
         layers.dedup_by(|a, b| a.name.to_uppercase() == b.name.to_uppercase());
         let layer_ids = layers.iter().enumerate().map(|(i, l)| (l.name.to_uppercase(), i as u32)).collect();
-        let (paths, arcs, texts, skipped) = Default::default();
-        World { paths, arcs, texts, skipped, layers, layer_ids }
+        let (paths, arcs, texts, fills, images, skipped) = Default::default();
+        World { paths, arcs, texts, fills, images, skipped, layers, layer_ids }
     }
 
     fn layer_id(&mut self, name: &str) -> u32 {
+        self.layer(name, FOREGROUND)
+    }
+
+    /// Index of layer `name`, added with colour `color` if it is not known yet.
+    pub(crate) fn layer(&mut self, name: &str, color: u32) -> u32 {
         let key = name.to_uppercase();
         if let Some(&id) = self.layer_ids.get(&key) {
             return id;
         }
         let id = self.layers.len() as u32;
-        self.layers.push(Layer { name: name.to_string(), color: FOREGROUND, visible: true });
+        self.layers.push(Layer { name: name.to_string(), color, visible: true });
         self.layer_ids.insert(key, id);
         id
     }
@@ -205,8 +239,21 @@ impl<'a> World<'a> {
 
     pub(crate) fn path(&mut self, points: Vec<P>, m: &Affine, pen: Pen) {
         if points.len() >= 2 {
-            self.paths.push(Path { points: points.into_iter().map(|p| m.apply(p)).collect(), color: pen.color, layer: pen.layer });
+            self.paths.push(Path { points: points.into_iter().map(|p| m.apply(p)).collect(), color: pen.color, width: pen.width, layer: pen.layer });
         }
+    }
+
+    /// Rings with fewer than three points are dropped.
+    pub(crate) fn fill(&mut self, rings: Vec<Vec<P>>, even_odd: bool, m: &Affine, pen: Pen) {
+        let rings: Vec<Vec<P>> = rings.into_iter().filter(|r| r.len() >= 3).map(|r| r.into_iter().map(|p| m.apply(p)).collect()).collect();
+        if !rings.is_empty() {
+            self.fills.push(Fill { rings, even_odd, color: pen.color, layer: pen.layer });
+        }
+    }
+
+    /// `pos` is the top-left corner in world coordinates (Y up).
+    pub(crate) fn image(&mut self, image: Image, pos: P, px: f64, layer: u32) {
+        self.images.push(PlacedImage { image, pos, px, layer });
     }
 
     fn arc(&mut self, a: Arc, m: &Affine) {
@@ -215,14 +262,14 @@ impl<'a> World<'a> {
 
     pub(crate) fn circle_arc(&mut self, centre: P, r: f64, start: f64, sweep: f64, m: &Affine, pen: Pen) {
         if r > 0.0 {
-            self.arc(Arc { centre, u: [r, 0.0], v: [0.0, r], t0: start, t1: start + sweep, color: pen.color, layer: pen.layer }, m);
+            self.arc(Arc { centre, u: [r, 0.0], v: [0.0, r], t0: start, t1: start + sweep, color: pen.color, width: pen.width, layer: pen.layer }, m);
         }
     }
 
     /// `ratio` is minor / major axis, negated for a flipped extrusion: the minor axis is the
     /// extrusion direction × the major axis.
     pub(crate) fn ellipse(&mut self, centre: P, u: P, ratio: f64, t0: f64, t1: f64, m: &Affine, pen: Pen) {
-        self.arc(Arc { centre, u, v: [-u[1] * ratio, u[0] * ratio], t0, t1: t0 + sweep(t0, t1), color: pen.color, layer: pen.layer }, m);
+        self.arc(Arc { centre, u, v: [-u[1] * ratio, u[0] * ratio], t0, t1: t0 + sweep(t0, t1), color: pen.color, width: pen.width, layer: pen.layer }, m);
     }
 
     /// Straight runs become paths; each bulged segment (bulge = tan(sweep / 4)) becomes an arc.
@@ -284,6 +331,8 @@ impl<'a> World<'a> {
             paths: self.paths.into_iter().map(|p| Path { points: p.points.into_iter().map(pt).collect(), ..p }).collect(),
             arcs: self.arcs.into_iter().map(|a| Arc { centre: pt(a.centre), u: vec(a.u), v: vec(a.v), ..a }).collect(),
             texts: self.texts.into_iter().map(|t| Text { pos: pt(t.pos), x: vec(t.x), up: vec(t.up), ..t }).collect(),
+            fills: self.fills.into_iter().map(|f| Fill { rings: f.rings.into_iter().map(|r| r.into_iter().map(pt).collect()).collect(), ..f }).collect(),
+            images: self.images.into_iter().map(|i| PlacedImage { pos: pt(i.pos), ..i }).collect(),
             layers: self.layers,
             info,
         })
@@ -303,6 +352,12 @@ impl<'a> World<'a> {
             (0..=32).for_each(|k| grow(a.at(a.t0 + (a.t1 - a.t0) * k as f64 / 32.0)));
         }
         self.texts.iter().filter(|t| include(t.layer)).for_each(|t| grow(t.pos));
+        self.fills.iter().filter(|f| include(f.layer)).flat_map(|f| f.rings.iter().flatten()).for_each(|&p| grow(p));
+        for i in self.images.iter().filter(|i| include(i.layer)) {
+            let (w, h) = i.image.size();
+            grow(i.pos);
+            grow([i.pos[0] + w as f64 * i.px, i.pos[1] - h as f64 * i.px]);
+        }
         (min[0] <= max[0] && min[1] <= max[1]).then_some((min, max))
     }
 }
@@ -401,16 +456,16 @@ pub(crate) struct Affine([f64; 6]);
 impl Affine {
     pub(crate) const IDENTITY: Affine = Affine([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
 
-    fn translate([x, y]: P) -> Affine {
+    pub(crate) fn translate([x, y]: P) -> Affine {
         Affine([1.0, 0.0, 0.0, 1.0, x, y])
     }
 
-    fn rotate(angle: f64) -> Affine {
+    pub(crate) fn rotate(angle: f64) -> Affine {
         let (s, c) = angle.sin_cos();
         Affine([c, s, -s, c, 0.0, 0.0])
     }
 
-    fn scale(sx: f64, sy: f64) -> Affine {
+    pub(crate) fn scale(sx: f64, sy: f64) -> Affine {
         Affine([sx, 0.0, 0.0, sy, 0.0, 0.0])
     }
 
@@ -431,7 +486,7 @@ impl Affine {
         Affine([a * oa + c * ob, b * oa + d * ob, a * oc + c * od, b * oc + d * od, a * oe + c * of + e, b * oe + d * of + f])
     }
 
-    fn apply(&self, [x, y]: P) -> P {
+    pub(crate) fn apply(&self, [x, y]: P) -> P {
         let [a, b, c, d, e, f] = self.0;
         [a * x + c * y + e, b * x + d * y + f]
     }
@@ -470,7 +525,7 @@ pub(crate) fn style<'a>(w: &mut World, own: &'a str, true_color: Option<u32>, in
         256.. | ..0 => by_layer,
         index => color::aci(index),
     });
-    (name, Pen { color, layer })
+    (name, Pen { color, layer, width: 0.0 })
 }
 
 /// Block transforms for an INSERT at `at` (after `m` and the entity's OCS `ocs`): one per cell of

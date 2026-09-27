@@ -2,6 +2,8 @@
 
 /// The drawing's foreground colour (ACI 7): black on white paper, white on black.
 pub const FOREGROUND: u32 = 0x0100_0000;
+/// The paper colour: white on white paper, black on black. Used for erasing (e.g. HP-GL pen 0).
+pub const BACKGROUND: u32 = 0x0200_0000;
 
 /// ACI 1–255 as 0xRRGGBB, or `FOREGROUND` for 7. Out-of-range indices are treated as 7.
 pub fn aci(index: i64) -> u32 {

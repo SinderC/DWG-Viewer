@@ -1,9 +1,10 @@
-//! Drawing decoding (raster, DXF and DWG) and raster viewport rendering, exported to JavaScript via wasm-bindgen.
+//! Drawing decoding (raster, DXF, DWG and HP-GL) and raster viewport rendering, exported to JavaScript via wasm-bindgen.
 
 pub mod bitmap;
 pub mod cals;
 pub mod dwg;
 pub mod dxf;
+pub mod hpgl;
 pub mod orient;
 pub mod render;
 pub mod rgba;
@@ -96,23 +97,37 @@ impl RasterDoc {
     }
 }
 
-/// A DXF or DWG drawing as flat arrays for the canvas renderer. Coordinates are in drawing units,
-/// relative to the top-left of the extents with Y down. Colours are 0xRRGGBB or `FOREGROUND`.
+/// A DXF, DWG or HP-GL drawing as flat arrays for the canvas renderer. Coordinates are in drawing
+/// units, relative to the top-left of the extents with Y down. Colours are 0xRRGGBB, `FOREGROUND`
+/// or `BACKGROUND`.
 #[wasm_bindgen]
 pub struct DxfDoc {
     drawing: dxf::Drawing,
+    pages: u32,
 }
 
 #[wasm_bindgen]
 impl DxfDoc {
     pub fn open(data: &[u8]) -> Result<DxfDoc, JsError> {
-        Ok(DxfDoc { drawing: dxf::decode(data).map_err(|e| JsError::new(&e))? })
+        Ok(DxfDoc { drawing: dxf::decode(data).map_err(|e| JsError::new(&e))?, pages: 1 })
     }
 
     /// Opens a DWG (R13 and later) through the same vector pipeline.
     #[wasm_bindgen(js_name = openDwg)]
     pub fn open_dwg(data: &[u8]) -> Result<DxfDoc, JsError> {
-        Ok(DxfDoc { drawing: dwg::decode(data).map_err(|e| JsError::new(&e))? })
+        Ok(DxfDoc { drawing: dwg::decode(data).map_err(|e| JsError::new(&e))?, pages: 1 })
+    }
+
+    /// Opens page `page` (0-based) of an HP-GL, HP-GL/2 or HP RTL plot file.
+    #[wasm_bindgen(js_name = openHpgl)]
+    pub fn open_hpgl(data: &[u8], page: u32) -> Result<DxfDoc, JsError> {
+        let (drawing, pages) = hpgl::decode(data, page).map_err(|e| JsError::new(&e))?;
+        Ok(DxfDoc { drawing, pages })
+    }
+
+    #[wasm_bindgen(getter, js_name = pageCount)]
+    pub fn page_count(&self) -> u32 {
+        self.pages
     }
 
     #[wasm_bindgen(getter)]
@@ -152,6 +167,12 @@ impl DxfDoc {
         self.drawing.paths.iter().map(|p| p.color).collect()
     }
 
+    /// Line width of each path in drawing units; 0 = hairline.
+    #[wasm_bindgen(js_name = pathWidths)]
+    pub fn path_widths(&self) -> Vec<f64> {
+        self.drawing.paths.iter().map(|p| p.width).collect()
+    }
+
     /// Eight numbers per arc: centre x, y, u x, y, v x, y, t0, t1 (see `dxf::Arc`).
     pub fn arcs(&self) -> Vec<f64> {
         self.drawing.arcs.iter().flat_map(|a| [a.centre[0], a.centre[1], a.u[0], a.u[1], a.v[0], a.v[1], a.t0, a.t1]).collect()
@@ -160,6 +181,66 @@ impl DxfDoc {
     #[wasm_bindgen(js_name = arcColors)]
     pub fn arc_colors(&self) -> Vec<u32> {
         self.drawing.arcs.iter().map(|a| a.color).collect()
+    }
+
+    #[wasm_bindgen(js_name = arcWidths)]
+    pub fn arc_widths(&self) -> Vec<f64> {
+        self.drawing.arcs.iter().map(|a| a.width).collect()
+    }
+
+    /// Ring vertices of all fills as x, y pairs.
+    #[wasm_bindgen(js_name = fillPoints)]
+    pub fn fill_points(&self) -> Vec<f64> {
+        self.drawing.fills.iter().flat_map(|f| f.rings.iter().flatten().flatten().copied()).collect()
+    }
+
+    /// Vertex count of each ring, fill after fill.
+    #[wasm_bindgen(js_name = fillRingLengths)]
+    pub fn fill_ring_lengths(&self) -> Vec<u32> {
+        self.drawing.fills.iter().flat_map(|f| f.rings.iter().map(|r| r.len() as u32)).collect()
+    }
+
+    /// Ring count of each fill.
+    #[wasm_bindgen(js_name = fillRingCounts)]
+    pub fn fill_ring_counts(&self) -> Vec<u32> {
+        self.drawing.fills.iter().map(|f| f.rings.len() as u32).collect()
+    }
+
+    #[wasm_bindgen(js_name = fillColors)]
+    pub fn fill_colors(&self) -> Vec<u32> {
+        self.drawing.fills.iter().map(|f| f.color).collect()
+    }
+
+    #[wasm_bindgen(js_name = fillLayers)]
+    pub fn fill_layers(&self) -> Vec<u32> {
+        self.drawing.fills.iter().map(|f| f.layer).collect()
+    }
+
+    /// 1 for the even-odd fill rule, 0 for non-zero.
+    #[wasm_bindgen(js_name = fillEvenOdd)]
+    pub fn fill_even_odd(&self) -> Vec<u8> {
+        self.drawing.fills.iter().map(|f| f.even_odd as u8).collect()
+    }
+
+    /// Four numbers per image: top-left x, y, pixel size in drawing units, layer.
+    #[wasm_bindgen(js_name = imagePlacements)]
+    pub fn image_placements(&self) -> Vec<f64> {
+        self.drawing.images.iter().flat_map(|i| [i.pos[0], i.pos[1], i.px, i.layer as f64]).collect()
+    }
+
+    /// Moves the images out as `RasterDoc`s (in `imagePlacements()` order), which the caller frees.
+    #[wasm_bindgen(js_name = takeImages)]
+    pub fn take_images(&mut self) -> Vec<RasterDoc> {
+        std::mem::take(&mut self.drawing.images)
+            .into_iter()
+            .map(|i| {
+                let image = match i.image {
+                    tiff::Image::Bilevel(bitmap) => Image::Bilevel(Raster::new(bitmap)),
+                    tiff::Image::Color(rgba) => Image::Color(ColorRaster::new(rgba)),
+                };
+                RasterDoc { image, dpi: 0, info: Vec::new(), out: Vec::new() }
+            })
+            .collect()
     }
 
     /// Eight numbers per text: anchor x, y, baseline vector x, y, up vector x, y, halign, valign (see `dxf::Text`).
@@ -218,4 +299,10 @@ impl DxfDoc {
 #[wasm_bindgen(js_name = dxfForeground)]
 pub fn dxf_foreground() -> u32 {
     dxf::FOREGROUND
+}
+
+/// Colour value meaning "the paper colour" in `DxfDoc` colour arrays.
+#[wasm_bindgen(js_name = dxfBackground)]
+pub fn dxf_background() -> u32 {
+    dxf::BACKGROUND
 }
