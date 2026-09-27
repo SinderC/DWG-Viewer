@@ -1,10 +1,12 @@
 import { cals } from './formats/cals';
 import { dwg, dxf } from './formats/dxf';
+import { hpgl } from './formats/hpgl';
 import { tiff } from './formats/tiff';
 import type { DrawingDocument, FormatPlugin, Layer } from './formats/types';
 import { Viewer } from './viewer';
 
-const plugins: FormatPlugin[] = [cals, tiff, dxf, dwg];
+// HP-GL has no signature, so its loose sniff goes last.
+const plugins: FormatPlugin[] = [cals, tiff, dxf, dwg, hpgl];
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const fileInput = $<HTMLInputElement>('file');
@@ -23,6 +25,14 @@ const layerFilter = $<HTMLInputElement>('layer-filter');
 const layerList = $('layer-list');
 
 fileInput.accept = plugins.flatMap((p) => p.extensions.map((e) => `.${e}`)).join(',');
+$('formats').replaceChildren(
+  ...plugins.map((p) => {
+    const item = document.createElement('li');
+    item.textContent = p.name;
+    item.appendChild(document.createElement('span')).textContent = p.extensions.map((e) => `.${e}`).join(' ');
+    return item;
+  }),
+);
 
 const viewer = new Viewer($<HTMLCanvasElement>('canvas'), (view) => {
   zoomLabel.textContent = `${Math.round(view.scale * 100)}%`;

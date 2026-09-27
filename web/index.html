@@ -97,6 +97,10 @@
         pointer-events: none;
       }
       #hint[hidden] { display: none; }
+      #hint p { margin: 0; }
+      #formats { margin: 12px 0 16px; padding-left: 20px; line-height: 1.7; }
+      #formats li { color: var(--fg); }
+      #formats span { margin-left: 8px; color: var(--muted); font-size: 13px; }
       body.drop main { outline: 3px solid var(--accent); outline-offset: -3px; }
       dialog {
         max-width: min(640px, calc(100vw - 32px));
@@ -126,7 +130,7 @@
       <button id="zoom-in" title="Zoom in">+</button>
       <button id="fit" title="Fit to window (double-click)">Fit</button>
       <button id="actual" title="Actual pixels">1:1</button>
-      <button id="invert" title="Swap black and white (DXF/DWG: black background)" aria-pressed="false">Invert</button>
+      <button id="invert" title="Swap black and white (vector files: black background)" aria-pressed="false">Invert</button>
       <button id="info" title="File information" disabled>Info</button>
       <button id="layers" title="Show or hide layers" aria-pressed="false" hidden>Layers</button>
       <span id="pager" hidden>
@@ -149,7 +153,13 @@
     <div id="workspace">
       <main>
         <canvas id="canvas"></canvas>
-        <div id="hint">Open a CALS, TIFF, DXF or DWG file or drop it here<br />Wheel: zoom · Drag: pan · Double-click: fit</div>
+        <div id="hint">
+          <div>
+            <p>Open a drawing or drop it here:</p>
+            <ul id="formats"></ul>
+            <p>Wheel: zoom · Drag: pan · Double-click: fit</p>
+          </div>
+        </div>
       </main>
       <aside id="layers-panel" hidden>
         <input id="layer-filter" type="search" placeholder="Filter layers" aria-label="Filter layers" />
