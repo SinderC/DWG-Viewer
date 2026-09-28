@@ -18,8 +18,9 @@ the built page's Content-Security-Policy blocks all network access. Supported fo
   types, hatch patterns (filled solid), clip windows, planar RTL colour. Fills are drawn under all lines.
 - **DWF**: classic single-stream files (up to 5.5, including zlib-compressed sections) and DWF 6
   packages (one page per ePlot sheet): lines, polylines, polygons, triangle strips, contour sets,
-  circles, arcs, ellipses, text, colours and colour maps, line weights, layers, and the paper scale
-  from the sheet descriptor or `PlotInfo`. Not drawn: raster images, line patterns, markers, 3D (W3D)
+  circles, arcs, ellipses, text, colours and colour maps, line weights, layers, embedded images
+  (indexed, mapped, RGB/RGBA, JPEG, PNG, Group 4), and the paper scale from the sheet descriptor or
+  `PlotInfo`. Not drawn: bitonal and Group 3X images, raster overlays, line patterns, markers, 3D (W3D)
   sections; Gouraud shading is drawn flat. Tested only on synthetic files.
 
 **Live app:** https://sinderc.github.io/DWG-Viewer/ (deployed from `main` by GitHub Actions).

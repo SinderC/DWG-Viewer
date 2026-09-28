@@ -383,6 +383,7 @@ dependencies = [
  "quick-xml",
  "tiff",
  "wasm-bindgen",
+ "zune-jpeg",
 ]
 
 [[package]]

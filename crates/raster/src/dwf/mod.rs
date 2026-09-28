@@ -4,6 +4,7 @@
 //! followed by a ZIP archive: `manifest.xml` lists the sections, and each ePlot section's
 //! `descriptor.xml` names its W2D streams, paper size and the logical-to-paper transform.
 
+mod image;
 mod palette;
 mod w2d;
 mod xml;
@@ -107,7 +108,7 @@ fn descriptor_sheet(zip: &Zip, href: &str, title: &str) -> Option<Sheet> {
     let nodes = doc.descendants();
     let dir = href.rfind(['/', '\\']).map_or("", |i| &href[..=i]);
     // Resource paths are package paths; accept ones relative to the descriptor too.
-    let resolve = |r: &str| if zip.read(r).is_some() { r.to_string() } else { format!("{dir}{r}") };
+    let resolve = |r: &str| if zip.contains(r) { r.to_string() } else { format!("{dir}{r}") };
     let paper_node = nodes.iter().find(|n| n.name == "Paper");
     let units = match paper_node.and_then(|p| p.attr("units")) {
         Some(u) if u.eq_ignore_ascii_case("mm") => "mm",

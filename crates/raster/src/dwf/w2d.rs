@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::f64::consts::TAU;
 use std::io::Read;
 
+use super::image::{self, Kind};
 use super::palette;
 use crate::dxf::{Affine, Pen, World, P, BACKGROUND, FOREGROUND};
 use crate::hpgl::{pen_color, CAP_PER_EM};
@@ -523,10 +524,59 @@ impl<'w> State<'w> {
                 let colors = payload.get(1..1 + 4 * n).ok_or_else(truncated)?;
                 self.map = colors.chunks_exact(4).map(|b| self.rgba_bytes(b)).collect();
             }
-            0x0002..=0x0009 | 0x000C | 0x000D => self.skip("Raster image"),
+            0x0002..=0x0009 | 0x000C | 0x000D => self.image(op, payload)?,
             _ => {}
         }
         Ok(Flow::Next)
+    }
+
+    /// An image opcode's payload: size, corners (relative), identifier, [colour map], data.
+    fn image(&mut self, op: u16, payload: &[u8]) -> R<()> {
+        let mut c = Cur { d: payload, p: 0 };
+        let (width, height) = (c.u16()? as u32, c.u16()? as u32);
+        let (min, max) = (c.point32()?, c.point32()?);
+        let (min, max) = (self.relative(min), self.relative(max));
+        c.i32()?; // identifier
+        let own_map = matches!(op, 0x0002 | 0x0003 | 0x0005 | 0x000D);
+        let map = if own_map {
+            let n = match c.u8()? {
+                0 => 256,
+                n => n as usize,
+            };
+            (0..n).map(|_| self.rgba(&mut c)).collect::<R<Vec<_>>>()?
+        } else {
+            self.map.clone()
+        };
+        let size = c.i32()?.max(0) as usize;
+        let data = c.bytes(size)?;
+        let kind = match op {
+            0x0004 => Kind::Indexed,
+            0x0005 => Kind::Mapped,
+            0x0006 => Kind::Rgb,
+            0x0007 => Kind::Rgba,
+            0x0008 => Kind::Jpeg,
+            0x0009 => Kind::Group4,
+            0x000C => Kind::Png,
+            0x000D => Kind::Group4Mapped,
+            _ => {
+                self.skip("Raster image (bitonal or Group 3X)");
+                return Ok(());
+            }
+        };
+        if !self.visible {
+            return Ok(());
+        }
+        let decoded = image::decode(kind, width, height, &map, data);
+        let Ok(img) = decoded else {
+            self.world.skip("Raster image (unreadable)");
+            return Ok(());
+        };
+        // JPEG and PNG carry their own size; fit their width to the placement.
+        let (w, _) = img.size();
+        let s = self.scale();
+        let layer = self.pen().layer;
+        self.world.image(img, [min[0] as f64 * s, max[1] as f64 * s], (max[0] - min[0]) as f64 / w as f64 * s, layer);
+        Ok(())
     }
 
     /// Inflates a zlib section; the stream continues after its closing `}`.
@@ -1171,6 +1221,28 @@ pub(super) mod tests {
         assert_eq!(d.paths.len(), 1);
         assert!(s.info.contains(&("Author".into(), "Me".into())));
         assert!(s.info.iter().any(|(k, v)| k == "Warning" && v.contains("0xFF")));
+    }
+
+    #[test]
+    fn rgb_image_is_placed_by_its_corners() {
+        let mut payload = Vec::new();
+        payload.extend(2u16.to_le_bytes());
+        payload.extend(1u16.to_le_bytes());
+        payload.extend(le(&[10, 20, 20, 5])); // min (10, 20), max (30, 25): relative
+        payload.extend(le(&[7, 6])); // identifier, data size
+        payload.extend([255, 0, 0, 0, 0, 255, b'}']);
+        let mut body = b"{".to_vec();
+        body.extend(le(&[2 + payload.len() as i32]));
+        body.extend(6u16.to_le_bytes());
+        body.extend(payload);
+        body.extend(b"L 0,0 1,1 ");
+        let (d, _) = render(&stream(&body));
+        assert_eq!(d.images.len(), 1);
+        let i = &d.images[0];
+        assert_eq!(i.px, 10.0);
+        // Top-left (10, 25) against extents from (0, 0) to (30, 25).
+        assert_eq!(i.pos, [10.0, 0.0]);
+        assert_eq!(i.image.size(), (2, 1));
     }
 
     #[test]

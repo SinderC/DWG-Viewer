@@ -86,11 +86,18 @@ impl<'a> Zip<'a> {
         self.entries.iter().map(|e| e.name.as_str())
     }
 
+    fn find(&self, name: &str) -> Option<&Entry> {
+        let key = normalize(name);
+        self.entries.iter().find(|e| normalize(&e.name) == key)
+    }
+
+    pub(super) fn contains(&self, name: &str) -> bool {
+        self.find(name).is_some()
+    }
+
     /// The entry named `name` (see [`normalize`]), or `None` if there is none.
     pub(super) fn read(&self, name: &str) -> Option<Result<Vec<u8>, String>> {
-        let key = normalize(name);
-        let e = self.entries.iter().find(|e| normalize(&e.name) == key)?;
-        Some(self.extract(e))
+        self.find(name).map(|e| self.extract(e))
     }
 
     fn extract(&self, e: &Entry) -> Result<Vec<u8>, String> {

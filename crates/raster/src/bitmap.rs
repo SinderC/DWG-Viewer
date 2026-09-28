@@ -2,6 +2,9 @@
 
 use crate::orient::Transform;
 
+/// Upper bound on 1-bit image size (a quarter of a gigabyte of bitmap).
+pub const MAX_BILEVEL_PIXELS: u64 = 2_000_000_000;
+
 pub struct Bitmap {
     pub width: u32,
     pub height: u32,

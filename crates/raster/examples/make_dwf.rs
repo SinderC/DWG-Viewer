@@ -1,6 +1,6 @@
 //! Writes synthetic DWF files: `cargo run --release --example make_dwf -- DIR`.
 //! `DIR/synthetic-classic.dwf` is a DWF 0.55 stream; `DIR/synthetic-package.dwf` a DWF 6 package
-//! with two sheets. Both draw an A3 sheet in 1/100 mm with layers, colours, fills, arcs and text,
+//! with two sheets. Both draw an A3 sheet in 1/100 mm with layers, colours, fills, arcs, text and an image,
 //! and an "F" in the top-left corner that makes orientation errors obvious.
 
 use std::io::Write;
@@ -114,6 +114,27 @@ fn sheet(header: &str, plot_info: bool) -> Vec<u8> {
     w.ascii("(Font (Height 400)(Rotation 16384))");
     w.text(mm(400, 40), "Rotated 90");
     w.ascii("(Font (Rotation 0))");
+
+    // A 64 × 32 RGB gradient (opcode 0x0006), corners relative.
+    let (cols, rows) = (64u16, 32u16);
+    let pixels: Vec<u8> = (0..rows).flat_map(|y| (0..cols).flat_map(move |x| [(x * 4) as u8, (y * 8) as u8, 160])).collect();
+    let mut payload = Vec::new();
+    payload.extend(cols.to_le_bytes());
+    payload.extend(rows.to_le_bytes());
+    let mut corners = W2d::new("");
+    corners.at = w.at;
+    corners.rel(mm(300, 220));
+    corners.rel(mm(380, 260));
+    w.at = corners.at;
+    payload.extend(corners.out);
+    payload.extend(1i32.to_le_bytes()); // identifier
+    payload.extend((pixels.len() as i32).to_le_bytes());
+    payload.extend(pixels);
+    payload.push(b'}');
+    w.out.push(b'{');
+    w.i32s(&[2 + payload.len() as i32]);
+    w.out.extend(0x0006u16.to_le_bytes());
+    w.out.extend(payload);
 
     let mut inner = W2d::new("");
     inner.at = w.at;

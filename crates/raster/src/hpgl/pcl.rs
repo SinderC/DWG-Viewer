@@ -1,13 +1,11 @@
 //! PJL / PCL / HP RTL wrapper around HP-GL/2: finds the HP-GL/2 blocks and decodes RTL raster
 //! images. PCL text and page formatting are ignored.
 
-use crate::bitmap::Bitmap;
+use crate::bitmap::{Bitmap, MAX_BILEVEL_PIXELS};
 use crate::rgba::{rgb, RgbaImage, MAX_PIXELS};
 use crate::tiff::Image;
 
 const ESC: u8 = 0x1B;
-/// Upper bound on 1-bit image size (a quarter of a gigabyte of bitmap).
-const MAX_BILEVEL_PIXELS: u64 = 2_000_000_000;
 /// Upper bound on rows, so `ESC*b#Y` offsets cannot allocate without limit.
 const MAX_ROWS: usize = 1 << 20;
 const WHITE: u32 = 0xFFFFFF;
