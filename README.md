@@ -21,7 +21,10 @@ the built page's Content-Security-Policy blocks all network access. Supported fo
   circles, arcs, ellipses, text, colours and colour maps, line weights, layers, embedded images
   (indexed, mapped, RGB/RGBA, JPEG, PNG, Group 4), and the paper scale from the sheet descriptor or
   `PlotInfo`. Not drawn: bitonal and Group 3X images, raster overlays, line patterns, markers, 3D (W3D)
-  sections; Gouraud shading is drawn flat. Tested only on synthetic files.
+  sections; Gouraud shading is drawn flat. **DWFx** (XPS pages): paths with solid fills and strokes,
+  curves and arcs, text (in the viewer's font), PNG/JPEG/TIFF image fills, transforms and resource
+  dictionaries. Not drawn: gradients (drawn in their first colour), visual brushes, clipping, opacity.
+  Tested only on synthetic files.
 
 **Live app:** https://sinderc.github.io/DWG-Viewer/ (deployed from `main` by GitHub Actions).
 To use it offline, save the page (File → Save Page As) — it is a single self-contained HTML file.
@@ -59,7 +62,7 @@ cargo test                                                   # unit tests
 cargo test --release -p raster --test samples -- --ignored --nocapture   # decode everything in ./samples
 cargo run --release --example make_sample -- samples/test.cal 18000 12700 090,270   # synthetic test file
 cargo run --release --example dxf_to_dwg -- samples/in.dxf samples/out.dwg AC1018    # DWG from a DXF (acadrust)
-cargo run --release --example make_dwf -- samples                                   # synthetic classic and DWF 6 files
+cargo run --release --example make_dwf -- samples                                   # synthetic DWF (classic, 6.0) and DWFx files
 ```
 
 ## Layout
@@ -68,7 +71,7 @@ cargo run --release --example make_dwf -- samples                               
   orientation, viewport rendering (1-bit coverage in `render.rs`, colour mip pyramid in `rgba.rs`),
   DXF parsing and block expansion into paths, exact arcs and text (`dxf/`), DWG entities mapped onto
   the same output via `acadrust` (`dwg.rs`), HP-GL/2 interpreter plus PJL/PCL/RTL unwrapping onto the same
-  output (`hpgl/`), DWF W2D interpreter, ZIP and package manifest reading onto the same output (`dwf/`)
+  output (`hpgl/`), DWF W2D interpreter, ZIP/package reading and DWFx (XPS) pages onto the same output (`dwf/`)
 - `web/src/formats` — format plugin interface (`types.ts`), shared WASM adapter (`wasm.ts`), CALS, TIFF,
   DXF, DWG, HP-GL and DWF plugins (`dxf.ts` draws all vector geometry with Canvas 2D)
 - `web/src/viewer.ts` — canvas view, mouse zoom/pan

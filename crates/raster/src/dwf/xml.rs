@@ -3,6 +3,7 @@
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
 
+#[derive(Clone)]
 pub(super) struct Node {
     /// Local name, without namespace prefix.
     pub name: String,

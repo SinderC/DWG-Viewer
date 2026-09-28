@@ -201,7 +201,7 @@ fn unfilter(raw: &[u8], stride: usize, bpp: usize, rows: usize) -> Option<Vec<u8
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn pixels(image: &Image) -> Vec<u32> {
@@ -222,7 +222,7 @@ mod tests {
     }
 
     /// A PNG with one IDAT chunk (CRCs are not checked).
-    fn png_file(w: u32, h: u32, depth: u8, ctype: u8, extra: &[(&[u8; 4], Vec<u8>)], filtered_rows: &[u8]) -> Vec<u8> {
+    pub(crate) fn png_file(w: u32, h: u32, depth: u8, ctype: u8, extra: &[(&[u8; 4], Vec<u8>)], filtered_rows: &[u8]) -> Vec<u8> {
         use std::io::Write;
         let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
         z.write_all(filtered_rows).unwrap();

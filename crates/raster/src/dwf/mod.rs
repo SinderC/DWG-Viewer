@@ -1,13 +1,15 @@
-//! DWF files, drawn through the DXF output helpers.
+//! DWF and DWFx files, drawn through the DXF output helpers.
 //!
 //! A classic DWF (up to 5.5) is one W2D graphics stream. A DWF 6 package is `(DWF V06.00)`
 //! followed by a ZIP archive: `manifest.xml` lists the sections, and each ePlot section's
-//! `descriptor.xml` names its W2D streams, paper size and the logical-to-paper transform.
+//! `descriptor.xml` names its W2D streams, paper size and the logical-to-paper transform. A DWFx
+//! file is an XPS package (see `xps`).
 
 mod image;
 mod palette;
 mod w2d;
 mod xml;
+mod xps;
 mod zip;
 
 use crate::dxf::{self, World};
@@ -18,6 +20,9 @@ const W2D_MIME: &str = "application/x-w2d";
 
 /// Decodes sheet `page` (0-based) and returns it with the sheet count.
 pub fn decode(data: &[u8], page: u32) -> Result<(dxf::Drawing, u32), String> {
+    if data.starts_with(b"PK\x03\x04") {
+        return xps::decode(data, page);
+    }
     if !data.starts_with(b"(DWF V") {
         return Err("Not a DWF file".into());
     }

@@ -1,6 +1,6 @@
 //! Writes synthetic DWF files: `cargo run --release --example make_dwf -- DIR`.
 //! `DIR/synthetic-classic.dwf` is a DWF 0.55 stream; `DIR/synthetic-package.dwf` a DWF 6 package
-//! with two sheets. Both draw an A3 sheet in 1/100 mm with layers, colours, fills, arcs, text and an image,
+//! with two sheets; `DIR/synthetic.dwfx` an XPS page with paths, curves, text and a transformed canvas. Both draw an A3 sheet in 1/100 mm with layers, colours, fills, arcs, text and an image,
 //! and an "F" in the top-left corner that makes orientation errors obvious.
 
 use std::io::Write;
@@ -243,10 +243,36 @@ fn package() -> Vec<u8> {
     [b"(DWF V06.00)".as_slice(), &zip(&entries)].concat()
 }
 
+fn dwfx() -> Vec<u8> {
+    let rels = r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="R1" Type="http://schemas.microsoft.com/xps/2005/06/fixedrepresentation" Target="/FixedDocumentSequence.fdseq"/></Relationships>"#;
+    let seq = r#"<FixedDocumentSequence xmlns="http://schemas.microsoft.com/xps/2005/06"><DocumentReference Source="/Documents/1/FixedDocument.fdoc"/></FixedDocumentSequence>"#;
+    let doc = r#"<FixedDocument xmlns="http://schemas.microsoft.com/xps/2005/06"><PageContent Source="Pages/1.fpage"/></FixedDocument>"#;
+    // A4 landscape at 96 units per inch.
+    let page = r##"<FixedPage Width="1122.5" Height="793.7" xmlns="http://schemas.microsoft.com/xps/2005/06" xmlns:x="http://schemas.microsoft.com/xps/2005/06/resourcedictionary-key">
+  <FixedPage.Resources><ResourceDictionary><SolidColorBrush x:Key="blue" Color="#FF0000FF"/></ResourceDictionary></FixedPage.Resources>
+  <Path Data="M 38,38 L 1084,38 1084,755 38,755 Z" Stroke="#FF000000" StrokeThickness="2"/>
+  <Path Data="M 76,76 L 76,227 L 170,227 M 76,150 L 150,150" Stroke="#FF000000" StrokeThickness="3"/>
+  <Path Data="M 300,400 C 300,250 500,250 500,400 S 700,550 700,400" Stroke="#FFFF0000" StrokeThickness="1.5"/>
+  <Path Data="F1 M 800,300 A 100,100 0 1 1 800,301 Z M 850,300 L 950,300 900,380 Z" Fill="{StaticResource blue}"/>
+  <Canvas RenderTransform="0.866,0.5,-0.5,0.866,300,600">
+    <Path Data="M 0,0 L 200,0 200,60 0,60 Z" Fill="#FF00A000"/>
+    <Glyphs UnicodeString="Rotated 30°" OriginX="10" OriginY="45" FontRenderingEmSize="36" Fill="#FFFFFFFF"/>
+  </Canvas>
+  <Glyphs UnicodeString="Synthetic DWFx page" OriginX="76" OriginY="720" FontRenderingEmSize="40" Fill="#FF000000"/>
+</FixedPage>"##;
+    zip(&[
+        ("_rels/.rels", rels.as_bytes()),
+        ("FixedDocumentSequence.fdseq", seq.as_bytes()),
+        ("Documents/1/FixedDocument.fdoc", doc.as_bytes()),
+        ("Documents/1/Pages/1.fpage", page.as_bytes()),
+    ])
+}
+
 fn main() {
     let dir = std::env::args().nth(1).unwrap_or_else(|| "samples".into());
     let dir = std::path::Path::new(&dir);
     std::fs::write(dir.join("synthetic-classic.dwf"), sheet("(DWF V00.55)", true)).unwrap();
     std::fs::write(dir.join("synthetic-package.dwf"), package()).unwrap();
-    println!("Wrote {}/synthetic-classic.dwf and synthetic-package.dwf", dir.display());
+    std::fs::write(dir.join("synthetic.dwfx"), dwfx()).unwrap();
+    println!("Wrote synthetic-classic.dwf, synthetic-package.dwf and synthetic.dwfx to {}", dir.display());
 }
