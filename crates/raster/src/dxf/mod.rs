@@ -456,6 +456,11 @@ pub(crate) struct Affine([f64; 6]);
 impl Affine {
     pub(crate) const IDENTITY: Affine = Affine([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
 
+    /// From `[a, b, c, d, e, f]` in canvas (and XAML `m11, m12, m21, m22, dx, dy`) order.
+    pub(crate) fn new(m: [f64; 6]) -> Affine {
+        Affine(m)
+    }
+
     pub(crate) fn translate([x, y]: P) -> Affine {
         Affine([1.0, 0.0, 0.0, 1.0, x, y])
     }
@@ -491,7 +496,7 @@ impl Affine {
         [a * x + c * y + e, b * x + d * y + f]
     }
 
-    fn linear(&self, [x, y]: P) -> P {
+    pub(crate) fn linear(&self, [x, y]: P) -> P {
         let [a, b, c, d, ..] = self.0;
         [a * x + c * y, b * x + d * y]
     }

@@ -1,7 +1,8 @@
-//! Drawing decoding (raster, DXF, DWG and HP-GL) and raster viewport rendering, exported to JavaScript via wasm-bindgen.
+//! Drawing decoding (raster, DXF, DWG, HP-GL and DWF) and raster viewport rendering, exported to JavaScript via wasm-bindgen.
 
 pub mod bitmap;
 pub mod cals;
+pub mod dwf;
 pub mod dwg;
 pub mod dxf;
 pub mod hpgl;
@@ -97,7 +98,7 @@ impl RasterDoc {
     }
 }
 
-/// A DXF, DWG or HP-GL drawing as flat arrays for the canvas renderer. Coordinates are in drawing
+/// A DXF, DWG, HP-GL or DWF drawing as flat arrays for the canvas renderer. Coordinates are in drawing
 /// units, relative to the top-left of the extents with Y down. Colours are 0xRRGGBB, `FOREGROUND`
 /// or `BACKGROUND`.
 #[wasm_bindgen]
@@ -122,6 +123,13 @@ impl DxfDoc {
     #[wasm_bindgen(js_name = openHpgl)]
     pub fn open_hpgl(data: &[u8], page: u32) -> Result<DxfDoc, JsError> {
         let (drawing, pages) = hpgl::decode(data, page).map_err(|e| JsError::new(&e))?;
+        Ok(DxfDoc { drawing, pages })
+    }
+
+    /// Opens sheet `page` (0-based) of a DWF file.
+    #[wasm_bindgen(js_name = openDwf)]
+    pub fn open_dwf(data: &[u8], page: u32) -> Result<DxfDoc, JsError> {
+        let (drawing, pages) = dwf::decode(data, page).map_err(|e| JsError::new(&e))?;
         Ok(DxfDoc { drawing, pages })
     }
 

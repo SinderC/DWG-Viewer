@@ -1,4 +1,5 @@
 import { cals } from './formats/cals';
+import { dwf } from './formats/dwf';
 import { dwg, dxf } from './formats/dxf';
 import { hpgl } from './formats/hpgl';
 import { tiff } from './formats/tiff';
@@ -6,7 +7,7 @@ import type { DrawingDocument, FormatPlugin, Layer } from './formats/types';
 import { Viewer } from './viewer';
 
 // HP-GL has no signature, so its loose sniff goes last.
-const plugins: FormatPlugin[] = [cals, tiff, dxf, dwg, hpgl];
+const plugins: FormatPlugin[] = [cals, tiff, dxf, dwg, dwf, hpgl];
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const fileInput = $<HTMLInputElement>('file');
