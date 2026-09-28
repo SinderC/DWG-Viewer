@@ -9,6 +9,8 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 acadrust = { version = "0.5", default-features = false }
 fax = "0.2"
+flate2 = "1"
+quick-xml = "0.42"
 tiff = "0.11"
 wasm-bindgen = "0.2"
 

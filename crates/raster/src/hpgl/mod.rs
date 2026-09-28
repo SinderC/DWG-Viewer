@@ -33,7 +33,7 @@ const CHAR_SIZE_RELATIVE: P = [0.75, 1.5];
 /// Advance of the canvas' sans-serif per cap height, to turn HP-GL character spacing into a width factor.
 const ADVANCE_PER_CAP: f64 = 0.86;
 /// Cap height per point size of a font.
-const CAP_PER_EM: f64 = 0.7;
+pub(crate) const CAP_PER_EM: f64 = 0.7;
 /// Scaling points P1, P2 of an A-size plotter, when the file sets no plot size.
 const P1: P = [250.0, 596.0];
 const P2: P = [10250.0, 7796.0];
@@ -77,7 +77,7 @@ fn closed(mut ring: Vec<P>) -> Vec<P> {
 
 /// Pen colour for an RGB value; black and white become the foreground and paper colours so they
 /// follow the viewer's invert setting.
-fn pen_color(rgb: u32) -> u32 {
+pub(crate) fn pen_color(rgb: u32) -> u32 {
     match rgb {
         0 => FOREGROUND,
         0xFFFFFF => BACKGROUND,
