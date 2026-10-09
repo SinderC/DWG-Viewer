@@ -184,7 +184,9 @@ $('find-next').addEventListener('click', () => showHit(find.index + 1));
 $('find-close').addEventListener('click', () => toggleFind(false));
 
 const viewer = new Viewer(canvas, $<HTMLCanvasElement>('overlay'), paintOverlay, (view) => {
-  zoomLabel.textContent = `${Math.round(view.scale * 100)}%`;
+  // Raster: image pixels per device pixel, so 100% is 1:1. Vector: relative to fit, as drawing units have no screen size.
+  const zoom = viewer.document?.kind === 'vector' ? viewer.fitRatio() : view.scale;
+  zoomLabel.textContent = `${Math.round(zoom * 100)}%`;
   minimap.update();
 });
 const minimapEl = $('minimap');
