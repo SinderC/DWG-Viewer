@@ -11,19 +11,20 @@ const plugins: FormatPlugin[] = [cals, tiff, dxf, dwg, dwf, hpgl];
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const fileInput = $<HTMLInputElement>('file');
-const status = $('status');
+const title = $('title');
+const toastEl = $('toast');
 const zoomLabel = $('zoom');
-const hint = $('hint');
+const start = $('start');
 const pager = $('pager');
 const pageLabel = $('page');
 const actualSize = $('actual');
-const infoButton = $<HTMLButtonElement>('info');
 const infoDialog = $<HTMLDialogElement>('info-dialog');
-const infoTable = $<HTMLTableElement>('info-table');
+const infoBody = $('info-body');
 const layersButton = $<HTMLButtonElement>('layers');
 const layersPanel = $('layers-panel');
 const layerFilter = $<HTMLInputElement>('layer-filter');
 const layerList = $('layer-list');
+const layerCount = $('layer-count');
 
 fileInput.accept = plugins.flatMap((p) => p.extensions.map((e) => `.${e}`)).join(',');
 $('formats').replaceChildren(
@@ -50,8 +51,10 @@ interface OpenFile {
   plugin: FormatPlugin;
 }
 
+type Rows = [string, string][];
+
 /** The file on screen, kept so its other pages can be opened and its properties shown. */
-let current: (OpenFile & { page: number; pageCount: number; info: [string, string][] }) | null = null;
+let current: (OpenFile & { page: number; pageCount: number; info: Rows; formatInfo: Rows }) | null = null;
 
 const number = (n: number, digits = 6) => Number(n.toPrecision(digits)).toLocaleString('en-US');
 
@@ -63,9 +66,9 @@ function fileSize(bytes: number): string {
   return i === 0 ? `${bytes} bytes` : `${short} ${units[i]} (${bytes.toLocaleString('en-US')} bytes)`;
 }
 
-/** Rows for the file information dialog: general properties, then the format's own. */
-function fileInfo(file: OpenFile, doc: DrawingDocument, page: number): [string, string][] {
-  const rows: [string, string][] = [
+/** General rows for the file information sheet; the format's own rows are `doc.info`. */
+function fileInfo(file: OpenFile, doc: DrawingDocument, page: number): Rows {
+  const rows: Rows = [
     ['File', file.name],
     ['File size', fileSize(file.bytes.length)],
     ['Format', file.plugin.name],
@@ -80,27 +83,54 @@ function fileInfo(file: OpenFile, doc: DrawingDocument, page: number): [string, 
   } else {
     rows.push(['Extents', `${number(doc.width)} × ${number(doc.height)} ${doc.units || 'units'}`]);
   }
-  return [...rows, ...doc.info];
+  return rows;
+}
+
+/** A titled table of label/value rows. Values come from the file: set them as text, never as HTML. */
+function infoSection(heading: string, rows: Rows): HTMLElement[] {
+  const h3 = document.createElement('h3');
+  const table = document.createElement('table');
+  h3.textContent = heading;
+  for (const [label, value] of rows) {
+    const row = table.appendChild(document.createElement('tr'));
+    row.appendChild(document.createElement('th')).textContent = label;
+    row.appendChild(document.createElement('td')).textContent = value;
+  }
+  return [h3, table];
 }
 
 function showInfo(): void {
   if (!current) return;
-  // Values come from the file: set them as text, never as HTML.
-  infoTable.replaceChildren(
-    ...current.info.map(([label, value]) => {
-      const row = document.createElement('tr');
-      const th = row.appendChild(document.createElement('th'));
-      const td = row.appendChild(document.createElement('td'));
-      th.textContent = label;
-      td.textContent = value;
-      return row;
-    }),
-  );
+  const sections = infoSection('General', current.info);
+  if (current.formatInfo.length) sections.push(...infoSection(current.plugin.name, current.formatInfo));
+  infoBody.replaceChildren(...sections);
   infoDialog.showModal();
+}
+
+let toastTimer = 0;
+
+/** Shows `message` in the toast; it hides itself after `ms` unless `ms` is 0. */
+function toast(message: string, { error = false, ms = 4000 } = {}): void {
+  clearTimeout(toastTimer);
+  toastEl.textContent = message;
+  toastEl.classList.toggle('error', error);
+  toastEl.classList.add('show');
+  if (ms) toastTimer = setTimeout(hideToast, ms);
+}
+
+function hideToast(): void {
+  clearTimeout(toastTimer);
+  toastEl.classList.remove('show');
 }
 
 /** Layer rows of the document on screen, with their checkboxes. */
 let layerRows: { layer: Layer; row: HTMLLabelElement; box: HTMLInputElement }[] = [];
+
+/** Shows only `layer`. */
+function solo(layer: Layer): void {
+  layerRows.forEach((r) => (r.layer.visible = r.layer === layer));
+  syncLayers();
+}
 
 function showLayers(layers: Layer[]): void {
   layerRows = layers.map((layer) => {
@@ -108,16 +138,25 @@ function showLayers(layers: Layer[]): void {
     const box = row.appendChild(document.createElement('input'));
     const swatch = row.appendChild(document.createElement('span'));
     const name = row.appendChild(document.createElement('span'));
+    const only = row.appendChild(document.createElement('button'));
+    row.className = 'layer';
     box.type = 'checkbox';
     box.checked = layer.visible;
     swatch.className = 'swatch';
     swatch.style.background = layer.color;
+    name.className = 'name';
     // Layer names come from the file: set them as text, never as HTML.
     name.textContent = name.title = layer.name;
+    only.textContent = 'Only';
+    only.title = 'Show only this layer (Alt-click the checkbox)';
     box.addEventListener('click', (e) => {
-      if (e.altKey) layerRows.forEach((r) => (r.layer.visible = r.layer === layer));
-      else layer.visible = box.checked;
+      if (e.altKey) return solo(layer);
+      layer.visible = box.checked;
       syncLayers();
+    });
+    only.addEventListener('click', (e) => {
+      e.preventDefault();
+      solo(layer);
     });
     return { layer, row, box };
   });
@@ -127,6 +166,8 @@ function showLayers(layers: Layer[]): void {
 
 function syncLayers(): void {
   layerRows.forEach((r) => (r.box.checked = r.layer.visible));
+  const on = layerRows.filter((r) => r.layer.visible).length;
+  layerCount.textContent = `${on} of ${layerRows.length} shown`;
   viewer.redraw();
 }
 
@@ -141,32 +182,34 @@ function setLayers(visible: boolean): void {
   syncLayers();
 }
 
-function toggleLayersPanel(open = layersPanel.hidden): void {
-  layersPanel.hidden = !open;
+function toggleLayersPanel(open = !layersPanel.classList.contains('open')): void {
+  layersPanel.classList.toggle('open', open);
+  layersPanel.inert = !open;
   layersButton.setAttribute('aria-pressed', String(open));
 }
 
 function showError(name: string, err: unknown): void {
-  status.textContent = `${name}: ${err instanceof Error ? err.message : String(err)}`;
-  status.classList.add('error');
+  toast(`${name}: ${err instanceof Error ? err.message : String(err)}`, { error: true, ms: 8000 });
 }
 
 /** Shows page `page` of `file`; on failure the current document stays on screen. */
 function showPage(file: OpenFile, page: number): void {
   try {
     const doc = file.plugin.open(file.bytes, page);
-    current = { ...file, page, pageCount: doc.pageCount, info: fileInfo(file, doc, page) };
-    status.textContent = file.name;
-    status.classList.remove('error');
+    current = { ...file, page, pageCount: doc.pageCount, info: fileInfo(file, doc, page), formatInfo: doc.info };
+    title.textContent = title.title = file.name;
+    document.title = `${file.name} – Drawing Viewer`;
+    hideToast();
     pager.hidden = doc.pageCount < 2;
     actualSize.hidden = doc.kind !== 'raster';
-    infoButton.disabled = false;
     const layers = doc.kind === 'vector' ? doc.layers : [];
     layersButton.hidden = layers.length === 0;
     if (layersButton.hidden) toggleLayersPanel(false);
     showLayers(layers);
+    syncLayers();
     pageLabel.textContent = `${page + 1} / ${doc.pageCount}`;
-    hint.hidden = true;
+    start.hidden = true;
+    document.body.classList.add('has-doc');
     viewer.setDocument(doc);
   } catch (err) {
     showError(file.name, err);
@@ -178,10 +221,15 @@ function turnPage(delta: number): void {
   if (current && page >= 0 && page < current.pageCount) showPage(current, page);
 }
 
+/** Files above this size get a progress toast; decoding blocks the page, so it must be painted first. */
+const SLOW_FILE = 1 << 20;
+
 async function openFile(file: File): Promise<void> {
-  status.textContent = `Loading ${file.name}…`;
-  status.classList.remove('error');
   try {
+    if (file.size > SLOW_FILE) {
+      toast(`Opening ${file.name}…`, { ms: 0 });
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+    }
     const bytes = new Uint8Array(await file.arrayBuffer());
     const plugin = findPlugin(file.name, bytes);
     if (!plugin) throw new Error('Unsupported file format');
@@ -197,13 +245,16 @@ fileInput.addEventListener('change', () => {
   fileInput.value = '';
 });
 
+$('open').addEventListener('click', () => fileInput.click());
+$('start-open').addEventListener('click', () => fileInput.click());
+toastEl.addEventListener('click', hideToast);
 $('zoom-in').addEventListener('click', () => viewer.zoomIn());
 $('zoom-out').addEventListener('click', () => viewer.zoomOut());
 $('fit').addEventListener('click', () => viewer.fit());
 actualSize.addEventListener('click', () => viewer.actualSize());
 $('prev-page').addEventListener('click', () => turnPage(-1));
 $('next-page').addEventListener('click', () => turnPage(1));
-infoButton.addEventListener('click', showInfo);
+$('info').addEventListener('click', showInfo);
 layersButton.addEventListener('click', () => toggleLayersPanel());
 layerFilter.addEventListener('input', filterLayers);
 $('layers-on').addEventListener('click', () => setLayers(true));

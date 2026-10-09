@@ -6,171 +6,363 @@
     <title>Drawing Viewer</title>
     <style>
       :root {
-        --bg: #32363a;
-        --bar: #1f2226;
-        --fg: #e6e6e6;
-        --muted: #9aa0a6;
-        --accent: #4c8dff;
-        --error: #ff6b6b;
-        color-scheme: dark;
+        color-scheme: light dark;
+        --surround: #e3e3e8;
+        --fg: #1d1d1f;
+        --muted: #6e6e73;
+        --accent: #0071e3;
+        --error: #d70015;
+        --glass: rgb(250 250 252 / 0.72);
+        --glass-solid: #f5f5f7;
+        --sheet: rgb(250 250 252 / 0.92);
+        --glass-border: rgb(0 0 0 / 0.1);
+        --glass-edge: rgb(255 255 255 / 0.7);
+        --separator: rgb(0 0 0 / 0.1);
+        --hover: rgb(0 0 0 / 0.06);
+        --pressed: rgb(0 0 0 / 0.1);
+        --field: rgb(0 0 0 / 0.05);
+        --shadow: 0 8px 32px rgb(0 0 0 / 0.12), 0 1px 3px rgb(0 0 0 / 0.08);
+        --radius: 14px;
+        --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --surround: #1c1c1e;
+          --fg: #f5f5f7;
+          --muted: #98989d;
+          --accent: #0a84ff;
+          --error: #ff453a;
+          --glass: rgb(44 44 48 / 0.72);
+          --glass-solid: #2c2c2e;
+          --sheet: rgb(44 44 48 / 0.92);
+          --glass-border: rgb(0 0 0 / 0.5);
+          --glass-edge: rgb(255 255 255 / 0.1);
+          --separator: rgb(255 255 255 / 0.12);
+          --hover: rgb(255 255 255 / 0.08);
+          --pressed: rgb(255 255 255 / 0.14);
+          --field: rgb(255 255 255 / 0.07);
+          --shadow: 0 8px 32px rgb(0 0 0 / 0.4), 0 1px 3px rgb(0 0 0 / 0.3);
+        }
       }
       * { box-sizing: border-box; }
-      html, body { height: 100%; margin: 0; }
+      html, body { height: 100%; margin: 0; overflow: hidden; }
       body {
-        display: flex;
-        flex-direction: column;
-        background: var(--bg);
+        background: var(--surround);
         color: var(--fg);
-        font: 13px/1.4 system-ui, sans-serif;
+        font: 13px/1.4 system-ui, -apple-system, sans-serif;
+        -webkit-font-smoothing: antialiased;
         user-select: none;
       }
-      header {
-        display: flex;
+      [hidden] { display: none !important; }
+      svg.icon { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+
+      /* Floating translucent material for all chrome. */
+      .glass {
+        background: var(--glass);
+        -webkit-backdrop-filter: blur(20px) saturate(180%);
+        backdrop-filter: blur(20px) saturate(180%);
+        border: 1px solid var(--glass-border);
+        box-shadow: inset 0 1px 0 var(--glass-edge), var(--shadow);
+      }
+
+      button {
+        display: inline-flex;
         align-items: center;
-        gap: 4px;
-        padding: 6px 8px;
-        background: var(--bar);
-      }
-      button, label.button {
-        min-width: 32px;
-        height: 28px;
-        padding: 0 10px;
-        border: 1px solid #3c4046;
-        border-radius: 4px;
-        background: #2a2d32;
-        color: var(--fg);
-        font: inherit;
-        line-height: 26px;
-        cursor: pointer;
-      }
-      button:hover:not(:disabled), label.button:hover { background: #353940; }
-      button:disabled { opacity: 0.4; cursor: default; }
-      button[aria-pressed='true'] { background: var(--accent); border-color: var(--accent); color: #fff; }
-      label.button { margin-right: 8px; }
-      #zoom { min-width: 52px; text-align: center; color: var(--muted); font-variant-numeric: tabular-nums; }
-      #pager:not([hidden]) { display: flex; align-items: center; gap: 4px; margin-left: 8px; }
-      #page { min-width: 52px; text-align: center; color: var(--muted); font-variant-numeric: tabular-nums; }
-      #status { flex: 1; margin-left: 8px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted); }
-      #status.error { color: var(--error); }
-      #repo { display: flex; margin: 0 4px 0 8px; color: var(--muted); }
-      #repo:hover { color: var(--fg); }
-      #workspace { display: flex; flex: 1; min-height: 0; }
-      main { position: relative; flex: 1; min-width: 0; }
-      #layers-panel {
-        display: flex;
-        flex-direction: column;
+        justify-content: center;
         gap: 6px;
-        width: 240px;
-        padding: 8px;
-        background: var(--bar);
-        border-left: 1px solid #3c4046;
-      }
-      #layers-panel[hidden] { display: none; }
-      #layers-panel .row { display: flex; gap: 4px; }
-      #layers-panel .row button { flex: 1; }
-      #layer-filter {
-        height: 28px;
-        padding: 0 8px;
-        border: 1px solid #3c4046;
-        border-radius: 4px;
-        background: #2a2d32;
+        min-width: 32px;
+        height: 32px;
+        padding: 0 6px;
+        border: 0;
+        border-radius: 8px;
+        background: transparent;
         color: var(--fg);
         font: inherit;
+        cursor: pointer;
+        transition: transform 100ms ease-out, background-color 120ms ease-out;
+        -webkit-tap-highlight-color: transparent;
       }
-      #layer-list { flex: 1; min-height: 0; overflow-y: auto; }
-      #layer-list label { display: flex; align-items: center; gap: 6px; padding: 2px 0; cursor: pointer; }
-      #layer-list label[hidden] { display: none; }
-      #layer-list span:last-child { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-      .swatch { flex: none; width: 10px; height: 10px; border: 1px solid #0006; border-radius: 2px; }
-      #layers-panel .hint { color: var(--muted); font-size: 12px; }
-      canvas { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
+      @media (hover: hover) {
+        button:hover:not(:disabled) { background: var(--hover); }
+      }
+      button:active:not(:disabled) { transform: scale(0.94); background: var(--pressed); }
+      button:disabled { opacity: 0.35; cursor: default; }
+      button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+      button[aria-pressed='true'] { background: var(--accent); color: #fff; }
+      button.primary { height: 36px; padding: 0 18px; background: var(--accent); color: #fff; font-weight: 600; border-radius: 10px; }
+      @media (hover: hover) {
+        button.primary:hover:not(:disabled) { background: var(--accent); filter: brightness(1.08); }
+      }
+      .text-button { padding: 0 10px; font-weight: 500; }
+
+      main { position: fixed; inset: 0; }
+      canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
       canvas.dragging { cursor: grabbing; }
-      #hint {
+      body.drop main::after {
+        content: '';
         position: absolute;
-        inset: 24px;
-        display: grid;
-        place-items: center;
-        border: 2px dashed #4a4f56;
-        border-radius: 8px;
-        color: var(--muted);
-        font-size: 15px;
+        inset: 8px;
+        border: 3px solid var(--accent);
+        border-radius: 18px;
+        background: color-mix(in srgb, var(--accent) 8%, transparent);
         pointer-events: none;
       }
-      #hint[hidden] { display: none; }
-      #hint p { margin: 0; }
-      #formats { margin: 12px 0 16px; padding-left: 20px; line-height: 1.7; }
-      #formats li { color: var(--fg); }
-      #formats span { margin-left: 8px; color: var(--muted); font-size: 13px; }
-      body.drop main { outline: 3px solid var(--accent); outline-offset: -3px; }
+
+      /* Toolbar: one floating pill, controls grouped by what they act on. */
+      #toolbar {
+        position: fixed;
+        top: 12px;
+        left: 50%;
+        transform: translateX(-50%);
+        display: flex;
+        align-items: center;
+        max-width: calc(100vw - 24px);
+        padding: 4px;
+        border-radius: var(--radius);
+        overflow-x: auto;
+        scrollbar-width: none;
+        z-index: 2;
+      }
+      .group { display: flex; flex: none; align-items: center; gap: 2px; }
+      .group + .group { margin-left: 6px; padding-left: 6px; border-left: 1px solid var(--separator); }
+      #title {
+        max-width: 28ch;
+        padding: 0 8px 0 4px;
+        overflow: hidden;
+        font-weight: 600;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+      #title:empty { display: none; }
+      body:not(.has-doc) .doc, body:not(.has-doc) #toolbar { display: none; }
+      #zoom, #page { min-width: 48px; color: var(--muted); font-variant-numeric: tabular-nums; text-align: center; }
+      #actual { font-weight: 600; font-size: 12px; }
+      @media (max-width: 640px) {
+        #title { display: none; }
+        #toolbar { left: 12px; transform: none; }
+      }
+
+      /* Layers: an inset card that slides in from, and back out to, the right edge. */
+      #layers-panel {
+        position: fixed;
+        top: 64px;
+        right: 12px;
+        bottom: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        width: 264px;
+        max-width: calc(100vw - 24px);
+        padding: 12px;
+        border-radius: var(--radius);
+        transform: translateX(calc(100% + 24px));
+        opacity: 0;
+        visibility: hidden;
+        transition: transform 380ms var(--ease-out), opacity 200ms ease-out, visibility 0s 380ms;
+        z-index: 1;
+      }
+      #layers-panel.open { transform: none; opacity: 1; visibility: visible; transition: transform 380ms var(--ease-out), opacity 200ms ease-out; }
+      .panel-header { display: flex; align-items: baseline; justify-content: space-between; padding: 0 2px; }
+      .panel-header h2 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
+      .count { color: var(--muted); font-variant-numeric: tabular-nums; }
+      input[type='search'] {
+        height: 30px;
+        padding: 0 10px;
+        border: 0;
+        border-radius: 8px;
+        background: var(--field);
+        color: var(--fg);
+        font: inherit;
+      }
+      #layers-panel .row { display: flex; gap: 4px; }
+      #layers-panel .row button { flex: 1; background: var(--field); font-weight: 500; }
+      #layer-list { flex: 1; min-height: 0; margin: 0 -6px; overflow-y: auto; }
+      .layer { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 2px 0 8px; border-radius: 7px; cursor: pointer; }
+      @media (hover: hover) {
+        .layer:hover { background: var(--hover); }
+      }
+      .layer input { flex: none; margin: 0; accent-color: var(--accent); }
+      .layer .name { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+      .layer button { min-width: 0; height: 24px; padding: 0 8px; color: var(--muted); font-size: 12px; opacity: 0; }
+      .layer:hover button, .layer button:focus-visible { opacity: 1; }
+      @media (hover: none) {
+        .layer button { opacity: 1; }
+      }
+      .swatch { flex: none; width: 12px; height: 12px; border-radius: 4px; box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.2); }
+
+      /* Start screen. */
+      #start {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        padding: 72px 16px 16px;
+        overflow-y: auto;
+      }
+      .card {
+        width: min(480px, 100%);
+        padding: 32px;
+        border-radius: 22px;
+        text-align: center;
+        transition: transform 300ms var(--ease-out), box-shadow 300ms var(--ease-out);
+      }
+      body.drop .card { transform: scale(1.02); box-shadow: inset 0 1px 0 var(--glass-edge), 0 0 0 3px var(--accent), var(--shadow); }
+      body.drop #start ~ main::after { display: none; }
+      .card .glyph { width: 56px; height: 56px; color: var(--accent); stroke-width: 1.2; }
+      .card h1 { margin: 12px 0 6px; font-size: 28px; font-weight: 700; line-height: 1.1; letter-spacing: -0.02em; }
+      .card p { margin: 0; color: var(--muted); font-size: 14px; }
+      .card .primary { margin: 20px 0 24px; }
+      #formats { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; margin: 0; padding: 0; list-style: none; }
+      #formats li { padding: 4px 10px; border-radius: 999px; background: var(--field); font-weight: 500; }
+      #formats span { margin-left: 6px; color: var(--muted); font-weight: 400; }
+      .card footer { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 24px; color: var(--muted); font-size: 12px; }
+      .card footer a { display: flex; color: inherit; }
+      .card footer a:hover { color: var(--fg); }
+
+      /* Toast for progress and errors. */
+      #toast {
+        position: fixed;
+        bottom: 20px;
+        left: 50%;
+        max-width: calc(100vw - 32px);
+        padding: 9px 16px;
+        border-radius: 999px;
+        overflow: hidden;
+        font-weight: 500;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+        transform: translate(-50%, 16px) scale(0.96);
+        opacity: 0;
+        transition: transform 300ms var(--ease-out), opacity 200ms ease-out;
+        pointer-events: none;
+        z-index: 3;
+      }
+      #toast.show { transform: translate(-50%, 0); opacity: 1; pointer-events: auto; }
+      #toast.error { color: var(--error); }
+
+      /* Sheets materialize: scale and fade in, the page dims behind them. */
       dialog {
-        max-width: min(640px, calc(100vw - 32px));
+        width: min(560px, calc(100vw - 32px));
         max-height: 80vh;
         padding: 0;
-        border: 1px solid #3c4046;
-        border-radius: 8px;
-        background: var(--bar);
+        border-radius: 18px;
         color: var(--fg);
         user-select: text;
+        opacity: 0;
+        transform: scale(0.96);
+        transition: transform 280ms var(--ease-out), opacity 200ms ease-out, overlay 280ms allow-discrete, display 280ms allow-discrete;
       }
-      dialog::backdrop { background: rgb(0 0 0 / 0.5); }
-      dialog form { display: flex; flex-direction: column; padding: 16px; }
-      dialog h2 { margin: 0 0 12px; font-size: 15px; font-weight: 600; }
-      dialog table { border-collapse: collapse; }
-      dialog th { padding: 3px 16px 3px 0; color: var(--muted); font-weight: normal; text-align: left; vertical-align: top; white-space: nowrap; }
-      dialog td { padding: 3px 0; overflow-wrap: anywhere; white-space: pre-wrap; }
-      dialog form button { align-self: flex-end; margin-top: 12px; }
+      dialog.glass { background: var(--sheet); -webkit-backdrop-filter: blur(40px) saturate(180%); backdrop-filter: blur(40px) saturate(180%); }
+      dialog[open] { opacity: 1; transform: none; }
+      @starting-style {
+        dialog[open] { opacity: 0; transform: scale(0.96); }
+      }
+      dialog::backdrop { background: rgb(0 0 0 / 0); transition: background-color 280ms ease-out, overlay 280ms allow-discrete, display 280ms allow-discrete; }
+      dialog[open]::backdrop { background: rgb(0 0 0 / 0.3); }
+      @starting-style {
+        dialog[open]::backdrop { background: rgb(0 0 0 / 0); }
+      }
+      dialog form { display: flex; flex-direction: column; padding: 20px; }
+      dialog h2 { margin: 0 0 4px; font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
+      dialog h3 { margin: 16px 0 6px; color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
+      dialog table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+      dialog tr + tr { border-top: 1px solid var(--separator); }
+      dialog th { width: 120px; padding: 6px 16px 6px 0; color: var(--muted); font-weight: 400; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+      dialog td { padding: 6px 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+      dialog form > button { align-self: flex-end; margin-top: 16px; }
+
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after { transition-property: opacity, visibility, overlay, display !important; }
+        button:active:not(:disabled) { transform: none; }
+      }
+      @media (prefers-reduced-transparency: reduce) {
+        .glass, dialog.glass { background: var(--glass-solid); -webkit-backdrop-filter: none; backdrop-filter: none; }
+      }
+      @media (prefers-contrast: more) {
+        :root { --glass-border: var(--fg); --separator: var(--muted); }
+        .glass, dialog.glass { background: var(--glass-solid); -webkit-backdrop-filter: none; backdrop-filter: none; }
+      }
     </style>
   </head>
   <body>
-    <header>
-      <label class="button" for="file">Open…</label>
-      <input id="file" type="file" hidden />
-      <button id="zoom-out" title="Zoom out">−</button>
-      <span id="zoom">–</span>
-      <button id="zoom-in" title="Zoom in">+</button>
-      <button id="fit" title="Fit to window (double-click)">Fit</button>
-      <button id="actual" title="Actual pixels">1:1</button>
-      <button id="invert" title="Swap black and white (vector files: black background)" aria-pressed="false">Invert</button>
-      <button id="info" title="File information" disabled>Info</button>
-      <button id="layers" title="Show or hide layers" aria-pressed="false" hidden>Layers</button>
-      <span id="pager" hidden>
-        <button id="prev-page" title="Previous page">‹</button>
+    <svg width="0" height="0" style="position: absolute" aria-hidden="true">
+      <symbol id="i-open" viewBox="0 0 20 20"><path d="M2.5 6A1.5 1.5 0 0 1 4 4.5h3.4l1.7 1.8H16a1.5 1.5 0 0 1 1.5 1.5v6.7A1.5 1.5 0 0 1 16 16H4a1.5 1.5 0 0 1-1.5-1.5z" /></symbol>
+      <symbol id="i-minus" viewBox="0 0 20 20"><path d="M5 10h10" /></symbol>
+      <symbol id="i-plus" viewBox="0 0 20 20"><path d="M5 10h10M10 5v10" /></symbol>
+      <symbol id="i-fit" viewBox="0 0 20 20"><path d="M3 7.5v-3A1.5 1.5 0 0 1 4.5 3h3M12.5 3h3A1.5 1.5 0 0 1 17 4.5v3M17 12.5v3a1.5 1.5 0 0 1-1.5 1.5h-3M7.5 17h-3A1.5 1.5 0 0 1 3 15.5v-3" /></symbol>
+      <symbol id="i-invert" viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.5" /><path d="M10 3.5a6.5 6.5 0 0 1 0 13z" fill="currentColor" /></symbol>
+      <symbol id="i-layers" viewBox="0 0 20 20"><path d="M10 3l7 3.6-7 3.6-7-3.6zM3 10.2l7 3.6 7-3.6M3 13.6l7 3.6 7-3.6" /></symbol>
+      <symbol id="i-info" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7" /><path d="M10 9v5" /><circle cx="10" cy="6.4" r="0.5" fill="currentColor" /></symbol>
+      <symbol id="i-prev" viewBox="0 0 20 20"><path d="M12 5l-5 5 5 5" /></symbol>
+      <symbol id="i-next" viewBox="0 0 20 20"><path d="M8 5l5 5-5 5" /></symbol>
+      <symbol id="i-drawing" viewBox="0 0 48 48"><path d="M10 5h20l10 10v28H10z" /><path d="M30 5v10h10M16 36l8-14 8 14zM16 27h6" /></symbol>
+    </svg>
+    <input id="file" type="file" hidden />
+
+    <main>
+      <canvas id="canvas"></canvas>
+    </main>
+
+    <div id="start">
+      <div class="card glass">
+        <svg class="icon glyph" aria-hidden="true"><use href="#i-drawing" /></svg>
+        <h1>Drawing Viewer</h1>
+        <p>Open an engineering drawing, or drop it anywhere on this page.</p>
+        <button class="primary" id="start-open">Open Drawing…</button>
+        <ul id="formats" aria-label="Supported formats"></ul>
+        <footer>
+          <span>Files are opened locally and never leave this computer.</span>
+          <a href="https://github.com/SinderC/DWG-Viewer" target="_blank" rel="noopener" title="Source on GitHub" aria-label="Source on GitHub">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z" /></svg>
+          </a>
+        </footer>
+      </div>
+    </div>
+
+    <div id="toolbar" class="glass" role="toolbar" aria-label="Drawing">
+      <div class="group">
+        <button id="open" title="Open…" aria-label="Open"><svg class="icon"><use href="#i-open" /></svg></button>
+        <span id="title"></span>
+      </div>
+      <div class="group doc">
+        <button id="zoom-out" title="Zoom out" aria-label="Zoom out"><svg class="icon"><use href="#i-minus" /></svg></button>
+        <span id="zoom" aria-live="polite">–</span>
+        <button id="zoom-in" title="Zoom in" aria-label="Zoom in"><svg class="icon"><use href="#i-plus" /></svg></button>
+        <button id="fit" title="Fit to window (double-click)" aria-label="Fit to window"><svg class="icon"><use href="#i-fit" /></svg></button>
+        <button id="actual" title="Actual pixels" aria-label="Actual pixels">1:1</button>
+      </div>
+      <div class="group doc">
+        <button id="invert" title="Swap black and white" aria-label="Invert" aria-pressed="false"><svg class="icon"><use href="#i-invert" /></svg></button>
+        <button id="layers" title="Layers" aria-label="Layers" aria-pressed="false" hidden><svg class="icon"><use href="#i-layers" /></svg></button>
+        <button id="info" title="File information" aria-label="File information"><svg class="icon"><use href="#i-info" /></svg></button>
+      </div>
+      <div class="group doc" id="pager" hidden>
+        <button id="prev-page" title="Previous page" aria-label="Previous page"><svg class="icon"><use href="#i-prev" /></svg></button>
         <span id="page"></span>
-        <button id="next-page" title="Next page">›</button>
-      </span>
-      <span id="status">Files are opened locally and never leave this computer.</span>
-      <a id="repo" href="https://github.com/SinderC/DWG-Viewer" target="_blank" rel="noopener" title="Source on GitHub" aria-label="Source on GitHub">
-        <svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/></svg>
-      </a>
-    </header>
-    <dialog id="info-dialog" aria-labelledby="info-title">
+        <button id="next-page" title="Next page" aria-label="Next page"><svg class="icon"><use href="#i-next" /></svg></button>
+      </div>
+    </div>
+
+    <aside id="layers-panel" class="glass" aria-label="Layers" inert>
+      <div class="panel-header"><h2>Layers</h2><span class="count" id="layer-count"></span></div>
+      <input id="layer-filter" type="search" placeholder="Filter" aria-label="Filter layers" />
+      <div class="row">
+        <button id="layers-on">Show All</button>
+        <button id="layers-off">Hide All</button>
+      </div>
+      <div id="layer-list"></div>
+    </aside>
+
+    <div id="toast" class="glass" role="status" aria-live="polite"></div>
+
+    <dialog id="info-dialog" class="glass" aria-labelledby="info-title">
       <form method="dialog">
-        <h2 id="info-title">File information</h2>
-        <table id="info-table"></table>
-        <button>Close</button>
+        <h2 id="info-title">File Information</h2>
+        <div id="info-body"></div>
+        <button class="primary">Done</button>
       </form>
     </dialog>
-    <div id="workspace">
-      <main>
-        <canvas id="canvas"></canvas>
-        <div id="hint">
-          <div>
-            <p>Open a drawing or drop it here:</p>
-            <ul id="formats"></ul>
-            <p>Wheel: zoom · Drag: pan · Double-click: fit</p>
-          </div>
-        </div>
-      </main>
-      <aside id="layers-panel" hidden>
-        <input id="layer-filter" type="search" placeholder="Filter layers" aria-label="Filter layers" />
-        <div class="row">
-          <button id="layers-on">All on</button>
-          <button id="layers-off">All off</button>
-        </div>
-        <div id="layer-list"></div>
-        <div class="hint">Alt-click: show only that layer</div>
-      </aside>
-    </div>
+
     <script type="module" src="./src/main.ts"></script>
   </body>
 </html>
