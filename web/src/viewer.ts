@@ -37,6 +37,10 @@ export class Viewer {
   private readonly overlayCtx: CanvasRenderingContext2D;
   /** Whether the next frame must repaint the document, or only the overlay. */
   private docDirty = false;
+  /** Pointers down on the canvas, in CSS pixels. */
+  private readonly pointers = new Map<number, { x: number; y: number }>();
+  /** Finger distance and midpoint of a two-finger pinch in progress, in CSS pixels. */
+  private pinch: { distance: number; x: number; y: number } | null = null;
   /** Where the press in progress started, to tell taps from drags. */
   private press: { x: number; y: number; moved: boolean } | null = null;
   private doc: DrawingDocument | null = null;
@@ -65,8 +69,8 @@ export class Viewer {
     canvas.addEventListener('wheel', (e) => this.onWheel(e), { passive: false });
     canvas.addEventListener('pointerdown', (e) => this.onPointerDown(e));
     canvas.addEventListener('pointermove', (e) => this.onPointerMove(e));
-    canvas.addEventListener('pointerup', (e) => this.endDrag(e));
-    canvas.addEventListener('pointercancel', () => this.endDrag());
+    canvas.addEventListener('pointerup', (e) => this.onPointerUp(e));
+    canvas.addEventListener('pointercancel', (e) => this.onPointerUp(e, true));
     canvas.addEventListener('dblclick', () => this.fit());
   }
 
@@ -283,12 +287,28 @@ export class Viewer {
     // Grabbing the drawing catches it mid-flight.
     this.stop();
     this.canvas.setPointerCapture(e.pointerId);
+    this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (this.pointers.size === 2) {
+      // A second finger turns the drag into a pinch; it is no longer a tap either.
+      this.drag = this.press = null;
+      this.pinch = this.pinchState();
+      return;
+    }
+    if (this.pointers.size > 2) return;
     this.canvas.classList.add('dragging');
     this.drag = [{ x: e.clientX, y: e.clientY, t: e.timeStamp }];
     this.press = { x: e.clientX, y: e.clientY, moved: false };
   }
 
+  private pinchState(): { distance: number; x: number; y: number } {
+    const [a, b] = this.pointers.values();
+    return { distance: Math.hypot(a.x - b.x, a.y - b.y), x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+  }
+
   private onPointerMove(e: PointerEvent): void {
+    if (!this.pointers.has(e.pointerId)) return;
+    this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (this.pinch) return this.onPinch();
     if (!this.drag) return;
     if (this.press && Math.hypot(e.clientX - this.press.x, e.clientY - this.press.y) > TAP_SLOP) this.press.moved = true;
     // Until it is clearly a drag, the drawing stays put so a tap lands where it was aimed.
@@ -301,6 +321,31 @@ export class Viewer {
     this.drag.push({ x: e.clientX, y: e.clientY, t: e.timeStamp });
     this.drag = this.drag.filter((p) => e.timeStamp - p.t <= VELOCITY_WINDOW);
     this.setView({ scale, x: x - dx, y: y - dy });
+  }
+
+  /** The drawing follows both fingers: it pans with their midpoint and scales with their distance. */
+  private onPinch(): void {
+    const before = this.pinch!;
+    const now = this.pinchState();
+    this.pinch = now;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = this.canvas.getBoundingClientRect();
+    const { scale, x, y } = this.view;
+    this.view = { scale, x: x - ((now.x - before.x) * dpr) / scale, y: y - ((now.y - before.y) * dpr) / scale };
+    this.zoomAt(now.distance / Math.max(1, before.distance), (now.x - rect.left) * dpr, (now.y - rect.top) * dpr);
+  }
+
+  private onPointerUp(e: PointerEvent, cancelled = false): void {
+    if (!this.pointers.delete(e.pointerId)) return;
+    if (this.pinch) {
+      if (this.pointers.size >= 2) return void (this.pinch = this.pinchState());
+      // Lifting one finger of a pinch hands over to dragging with the other, without a flick or tap.
+      this.pinch = null;
+      const rest = [...this.pointers.values()][0];
+      if (rest) this.drag = [{ ...rest, t: e.timeStamp }];
+      return;
+    }
+    if (this.pointers.size === 0) this.endDrag(cancelled ? undefined : e);
   }
 
   /** On release, the drawing keeps the finger's velocity and decelerates like a scroll view. */
