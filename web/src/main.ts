@@ -3,7 +3,7 @@ import { dwf } from './formats/dwf';
 import { dwg, dxf } from './formats/dxf';
 import { hpgl } from './formats/hpgl';
 import { tiff } from './formats/tiff';
-import type { DrawingDocument, FormatPlugin, Layer, View } from './formats/types';
+import type { DrawingDocument, FormatPlugin, Layer, TextHit, View } from './formats/types';
 import { Minimap } from './minimap';
 import { Viewer } from './viewer';
 
@@ -48,6 +48,7 @@ type Point = { x: number; y: number };
 const ACCENT = '#0a84ff';
 
 function paintOverlay(ctx: CanvasRenderingContext2D, view: View): void {
+  paintHits(ctx, view);
   const { a } = measure;
   const b = measure.b ?? measure.hover;
   if (!current || !a) return;
@@ -109,6 +110,78 @@ function setMeasuring(on: boolean): void {
   canvas.classList.toggle('measuring', on);
   viewer.redrawOverlay();
 }
+
+const findButton = $<HTMLButtonElement>('find');
+const findBar = $('find-bar');
+const findInput = $<HTMLInputElement>('find-input');
+const findCount = $('find-count');
+
+/** Text matches of the find bar, and the one shown. */
+const find = { hits: [] as TextHit[], index: 0 };
+
+/** Matches as highlighter marks; the current one outlined. */
+function paintHits(ctx: CanvasRenderingContext2D, view: View): void {
+  const dpr = window.devicePixelRatio || 1;
+  find.hits.forEach((hit, i) => {
+    ctx.beginPath();
+    for (const [x, y] of hit.corners) ctx.lineTo((x - view.x) * view.scale, (y - view.y) * view.scale);
+    ctx.closePath();
+    ctx.fillStyle = i === find.index ? 'rgb(255 214 10 / 0.55)' : 'rgb(255 214 10 / 0.3)';
+    ctx.fill();
+    if (i !== find.index) return;
+    ctx.lineWidth = 2 * dpr;
+    ctx.strokeStyle = '#ff9f0a';
+    ctx.stroke();
+  });
+}
+
+function runFind(): void {
+  const doc = current?.doc;
+  find.hits = doc?.kind === 'vector' ? doc.findText(findInput.value.trim()) : [];
+  find.index = 0;
+  showHit();
+}
+
+/** Moves to match `index` (wrapping around) and updates the counter. */
+function showHit(index = find.index): void {
+  const n = find.hits.length;
+  find.index = n ? (index + n) % n : 0;
+  findCount.textContent = !findInput.value.trim() ? '' : n ? `${find.index + 1} of ${n}` : 'No match';
+  const hit = find.hits[find.index];
+  if (hit) {
+    const xs = hit.corners.map((c) => c[0]);
+    const ys = hit.corners.map((c) => c[1]);
+    const [x, y] = [Math.min(...xs), Math.min(...ys)];
+    viewer.showRegion(x, y, Math.max(...xs) - x, Math.max(...ys) - y);
+  }
+  viewer.redrawOverlay();
+}
+
+function toggleFind(open = !findBar.classList.contains('open')): void {
+  findBar.classList.toggle('open', open);
+  findBar.inert = !open;
+  findButton.setAttribute('aria-pressed', String(open));
+  if (open) {
+    findInput.select();
+    findInput.focus();
+  } else {
+    find.hits = [];
+    findInput.blur();
+    viewer.redrawOverlay();
+  }
+}
+
+findButton.addEventListener('click', () => toggleFind());
+findInput.addEventListener('input', runFind);
+findInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') showHit(find.index + (e.shiftKey ? -1 : 1));
+  else if (e.key === 'Escape') toggleFind(false);
+  else return;
+  e.preventDefault();
+});
+$('find-prev').addEventListener('click', () => showHit(find.index - 1));
+$('find-next').addEventListener('click', () => showHit(find.index + 1));
+$('find-close').addEventListener('click', () => toggleFind(false));
 
 const viewer = new Viewer(canvas, $<HTMLCanvasElement>('overlay'), paintOverlay, (view) => {
   zoomLabel.textContent = `${Math.round(view.scale * 100)}%`;
@@ -290,11 +363,14 @@ function showPage(file: OpenFile, page: number): void {
     showLayers(layers);
     syncLayers();
     measure.a = measure.b = measure.hover = null;
+    findButton.hidden = doc.kind !== 'vector';
+    if (findButton.hidden) toggleFind(false);
     pageLabel.textContent = `${page + 1} / ${doc.pageCount}`;
     start.hidden = true;
     document.body.classList.add('has-doc');
     viewer.setDocument(doc);
     minimap.invalidate();
+    if (findBar.classList.contains('open')) runFind();
   } catch (err) {
     showError(file.name, err);
   }
@@ -444,6 +520,7 @@ const shortcuts: Shortcut[] = [
   { keys: ['ArrowLeft', 'PageUp'], label: 'Previous page', run: () => turnPage(-1), button: 'prev-page' },
   { keys: ['ArrowRight', 'PageDown'], label: 'Next page', run: () => turnPage(1), button: 'next-page' },
   { keys: ['Mod+s'], label: 'Save view as PNG', run: exportView, button: 'export' },
+  { keys: ['Mod+f'], label: 'Find text', run: () => toggleFind(true), when: () => !findButton.hidden, button: 'find' },
   { keys: ['m'], label: 'Measure distance', run: () => setMeasuring(!measure.on), button: 'measure' },
   { keys: ['Escape'], label: 'Stop measuring', run: () => setMeasuring(false), when: () => measure.on },
   { keys: ['?'], label: 'Keyboard shortcuts', run: () => keysDialog.showModal(), when: always },

@@ -26,6 +26,12 @@ export interface Layer {
   visible: boolean;
 }
 
+/** A text match: the matched string and the corners of its box, in drawing coordinates. */
+export interface TextHit {
+  text: string;
+  corners: [number, number][];
+}
+
 export interface VectorDocument {
   kind: 'vector';
   /** Extents in drawing units. */
@@ -42,6 +48,8 @@ export interface VectorDocument {
   layers: Layer[];
   /** Draws the whole canvas. `invert` puts the drawing on black instead of white paper. */
   draw(ctx: CanvasRenderingContext2D, view: View, invert: boolean): void;
+  /** Texts on visible layers containing `query`, ignoring case, in file order. */
+  findText(query: string): TextHit[];
   free(): void;
 }
 

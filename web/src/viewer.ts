@@ -239,6 +239,16 @@ export class Viewer {
     return this.view.scale / this.fitScale();
   }
 
+  /** Springs to a view centred on the box (x, y, w, h), zoomed so it spans about a third of the canvas. */
+  showRegion(x: number, y: number, w: number, h: number): void {
+    if (!this.doc) return;
+    const max = this.doc.kind === 'raster' ? MAX_SCALE : this.fitScale() * MAX_VECTOR_ZOOM;
+    const wanted = Math.min(this.canvas.width / (3 * w), this.canvas.height / (6 * h));
+    const scale = Math.min(max, Math.max(this.fitScale(), wanted));
+    const [cx, cy] = this.centre();
+    this.animateTo({ scale, x: x + w / 2 - cx / scale, y: y + h / 2 - cy / scale });
+  }
+
   /** Moves the drawing point (x, y) to the centre of the canvas, keeping the scale. */
   centreOn(x: number, y: number, animate: boolean): void {
     const { scale } = animate ? this.target() : this.view;
