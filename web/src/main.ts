@@ -356,6 +356,28 @@ viewer.onTap = (e) => {
   viewer.redrawOverlay();
 };
 measureButton.addEventListener('click', () => setMeasuring(!measure.on));
+
+/** Saves the view as shown, measurements included, as a PNG next to the file's name. */
+function exportView(): void {
+  if (!current) return;
+  const image = document.createElement('canvas');
+  image.width = canvas.width;
+  image.height = canvas.height;
+  const ctx = image.getContext('2d')!;
+  ctx.drawImage(canvas, 0, 0);
+  ctx.drawImage($<HTMLCanvasElement>('overlay'), 0, 0);
+  const base = current.name.replace(/\.[^.]*$/, '');
+  const name = `${base}${current.pageCount > 1 ? `-page${current.page + 1}` : ''}.png`;
+  image.toBlob((blob) => {
+    if (!blob) return showError(name, new Error('Could not create the image'));
+    const link = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: name });
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+    toast(`Saved ${name}`);
+  }, 'image/png');
+}
+
+$('export').addEventListener('click', exportView);
 canvas.addEventListener('pointerleave', () => (coords.hidden = true));
 
 fileInput.addEventListener('change', () => {
@@ -412,6 +434,7 @@ const shortcuts: Shortcut[] = [
   { keys: ['l'], label: 'Show or hide layers', run: () => toggleLayersPanel(), when: () => !layersButton.hidden, button: 'layers' },
   { keys: ['ArrowLeft', 'PageUp'], label: 'Previous page', run: () => turnPage(-1), button: 'prev-page' },
   { keys: ['ArrowRight', 'PageDown'], label: 'Next page', run: () => turnPage(1), button: 'next-page' },
+  { keys: ['Mod+s'], label: 'Save view as PNG', run: exportView, button: 'export' },
   { keys: ['m'], label: 'Measure distance', run: () => setMeasuring(!measure.on), button: 'measure' },
   { keys: ['Escape'], label: 'Stop measuring', run: () => setMeasuring(false), when: () => measure.on },
   { keys: ['?'], label: 'Keyboard shortcuts', run: () => keysDialog.showModal(), when: always },
