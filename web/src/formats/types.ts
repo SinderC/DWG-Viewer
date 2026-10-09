@@ -26,6 +26,12 @@ export interface Layer {
   visible: boolean;
 }
 
+/** A text match: the matched string and the corners of its box, in drawing coordinates. */
+export interface TextHit {
+  text: string;
+  corners: [number, number][];
+}
+
 export interface VectorDocument {
   kind: 'vector';
   /** Extents in drawing units. */
@@ -33,13 +39,19 @@ export interface VectorDocument {
   height: number;
   /** Length unit ("mm", "in", …), or "" if the file does not say. */
   units: string;
+  /** World coordinates of drawing (0, 0); world Y points up, drawing Y down. */
+  origin: [number, number];
   pageCount: number;
   /** Format-specific properties (version, layers, …) as label/value rows. */
   info: [string, string][];
+  /** Multiplies line widths (hairlines stay one device pixel); takes effect on the next `draw()`. */
+  lineScale: number;
   /** In name order; initially visible unless off or frozen in the file. */
   layers: Layer[];
   /** Draws the whole canvas. `invert` puts the drawing on black instead of white paper. */
   draw(ctx: CanvasRenderingContext2D, view: View, invert: boolean): void;
+  /** Texts on visible layers containing `query`, ignoring case, in file order. */
+  findText(query: string): TextHit[];
   free(): void;
 }
 

@@ -1,8 +1,12 @@
-import type { FormatPlugin, Layer, VectorDocument, View } from './types';
+import type { FormatPlugin, Layer, TextHit, VectorDocument, View } from './types';
 import { DxfDoc, dxfBackground, dxfForeground, infoRows, RasterDoc, renderRaster } from './wasm';
 
 const FOREGROUND = dxfForeground();
 const BACKGROUND = dxfBackground();
+/** Rough average glyph width, in ems, for estimating the size of a text. */
+const GLYPH_WIDTH = 0.5;
+/** Descender depth below the baseline, in cap heights. */
+const DESCENT = 0.3;
 /** DXF text height is the cap height; CSS font size is the em. */
 const EM_PER_CAP = 1 / 0.7;
 /** MTEXT default line spacing, in cap heights. */
@@ -194,6 +198,24 @@ function texts(doc: DxfDoc): Text[] {
   });
 }
 
+/**
+ * Approximate box of a text, as four corners. Lines are laid out as in `draw()`: in glyph space,
+ * line i's baseline is at (i - shift) pitches below the anchor, along the baseline and down vectors.
+ */
+function textBox(t: Text): [number, number][] {
+  const longest = Math.max(...t.lines.map((l) => l.length));
+  const width = longest * t.height * EM_PER_CAP * GLYPH_WIDTH;
+  const pitch = t.height * LINE_SPACING;
+  const left = t.align === 'left' ? 0 : t.align === 'center' ? -width / 2 : -width;
+  const capTop = t.baseline === 'top' ? 0 : t.baseline === 'middle' ? -t.height / 2 : -t.height;
+  const top = capTop - t.shift * pitch;
+  const bottom = top + t.height * (1 + DESCENT) + (t.lines.length - 1) * pitch;
+  // `matrix` maps glyph space, per unit of text height, to drawing directions.
+  const [ax, ay, dx, dy] = t.matrix;
+  const at = (u: number, v: number): [number, number] => [t.x + ax * u + dx * v, t.y + ay * u + dy * v];
+  return [at(left, top), at(left + width, top), at(left + width, bottom), at(left, bottom)];
+}
+
 function layers(doc: DxfDoc): Layer[] {
   const colors = doc.layerColors();
   const visible = doc.layerVisible();
@@ -217,9 +239,11 @@ export function vectorDocument(doc: DxfDoc): VectorDocument {
       width: doc.width,
       height: doc.height,
       units: doc.units,
+      origin: [doc.origin()[0], doc.origin()[1]],
       pageCount: doc.pageCount,
       info: infoRows(doc.info()),
       layers: layerList,
+      lineScale: 1,
       draw(ctx, view, invert) {
         const { scale, x, y } = view;
         const { width, height } = ctx.canvas;
@@ -245,7 +269,7 @@ export function vectorDocument(doc: DxfDoc): VectorDocument {
           if (!layerList[layer].visible) continue;
           for (const { color, width: lineWidth, path } of byStyle.values()) {
             ctx.strokeStyle = css(color, invert);
-            ctx.lineWidth = Math.max(lineWidth, 1 / scale);
+            ctx.lineWidth = Math.max(lineWidth * this.lineScale, 1 / scale);
             ctx.stroke(path);
           }
         }
@@ -263,6 +287,13 @@ export function vectorDocument(doc: DxfDoc): VectorDocument {
           ctx.fillStyle = css(t.color, invert);
           t.lines.forEach((line, i) => ctx.fillText(line, 0, (i - t.shift) * px * LINE_SPACING));
         }
+      },
+      findText(query) {
+        const needle = query.toLowerCase();
+        if (!needle) return [];
+        return labels
+          .filter((t) => layerList[t.layer].visible && t.lines.join(' ').toLowerCase().includes(needle))
+          .map((t): TextHit => ({ text: t.lines.join(' '), corners: textBox(t) }));
       },
       free: () => pictures.forEach((image) => image.raster.free()),
     };

@@ -3,7 +3,8 @@ import { dwf } from './formats/dwf';
 import { dwg, dxf } from './formats/dxf';
 import { hpgl } from './formats/hpgl';
 import { tiff } from './formats/tiff';
-import type { DrawingDocument, FormatPlugin, Layer } from './formats/types';
+import type { DrawingDocument, FormatPlugin, Layer, TextHit, View } from './formats/types';
+import { Minimap } from './minimap';
 import { Viewer } from './viewer';
 
 // HP-GL has no signature, so its loose sniff goes last.
@@ -11,19 +12,22 @@ const plugins: FormatPlugin[] = [cals, tiff, dxf, dwg, dwf, hpgl];
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const fileInput = $<HTMLInputElement>('file');
-const status = $('status');
+const title = $('title');
+const toastEl = $('toast');
 const zoomLabel = $('zoom');
-const hint = $('hint');
+const start = $('start');
 const pager = $('pager');
 const pageLabel = $('page');
 const actualSize = $('actual');
-const infoButton = $<HTMLButtonElement>('info');
 const infoDialog = $<HTMLDialogElement>('info-dialog');
-const infoTable = $<HTMLTableElement>('info-table');
+const infoBody = $('info-body');
 const layersButton = $<HTMLButtonElement>('layers');
 const layersPanel = $('layers-panel');
 const layerFilter = $<HTMLInputElement>('layer-filter');
 const layerList = $('layer-list');
+const layerCount = $('layer-count');
+const coords = $('coords');
+const canvas = $<HTMLCanvasElement>('canvas');
 
 fileInput.accept = plugins.flatMap((p) => p.extensions.map((e) => `.${e}`)).join(',');
 $('formats').replaceChildren(
@@ -35,9 +39,158 @@ $('formats').replaceChildren(
   }),
 );
 
-const viewer = new Viewer($<HTMLCanvasElement>('canvas'), (view) => {
-  zoomLabel.textContent = `${Math.round(view.scale * 100)}%`;
+const measureButton = $('measure');
+
+/** Measure tool: first and second point in drawing coordinates, and the pointer while placing the second. */
+const measure = { on: false, a: null as Point | null, b: null as Point | null, hover: null as Point | null };
+type Point = { x: number; y: number };
+
+const ACCENT = '#0a84ff';
+
+function paintOverlay(ctx: CanvasRenderingContext2D, view: View): void {
+  paintHits(ctx, view);
+  const { a } = measure;
+  const b = measure.b ?? measure.hover;
+  if (!current || !a) return;
+  const dpr = window.devicePixelRatio || 1;
+  const screen = (p: Point): [number, number] => [(p.x - view.x) * view.scale, (p.y - view.y) * view.scale];
+  const [ax, ay] = screen(a);
+  ctx.lineWidth = 2 * dpr;
+  ctx.strokeStyle = ACCENT;
+  ctx.fillStyle = '#fff';
+  if (b) {
+    const [bx, by] = screen(b);
+    ctx.beginPath();
+    ctx.moveTo(ax, ay);
+    ctx.lineTo(bx, by);
+    ctx.stroke();
+    dot(ctx, bx, by, dpr);
+    label(ctx, distanceText(current.doc, a, b), (ax + bx) / 2, (ay + by) / 2, dpr);
+  }
+  dot(ctx, ax, ay, dpr);
+}
+
+function dot(ctx: CanvasRenderingContext2D, x: number, y: number, dpr: number): void {
+  ctx.beginPath();
+  ctx.arc(x, y, 4 * dpr, 0, 2 * Math.PI);
+  ctx.fill();
+  ctx.stroke();
+}
+
+/** A pill-shaped label centred on (x, y), in device pixels. */
+function label(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, dpr: number): void {
+  ctx.font = `600 ${12 * dpr}px system-ui, sans-serif`;
+  const w = ctx.measureText(text).width + 16 * dpr;
+  const h = 22 * dpr;
+  ctx.fillStyle = ACCENT;
+  ctx.beginPath();
+  ctx.roundRect(x - w / 2, y - h / 2, w, h, h / 2);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, x, y);
+}
+
+/** Length and angle of a → b in the document's units; angles count counter-clockwise from +X. */
+function distanceText(doc: DrawingDocument, a: Point, b: Point): string {
+  const dx = b.x - a.x;
+  const dy = a.y - b.y;
+  const length = Math.hypot(dx, dy);
+  const angle = `${(((Math.atan2(dy, dx) * 180) / Math.PI + 360) % 360).toFixed(1)}°`;
+  if (doc.kind === 'vector') return `${number(length)} ${doc.units}`.trim() + ` · ${angle}`;
+  const px = `${number(length, 4)} px`;
+  return doc.dpi ? `${px} · ${number((length / doc.dpi) * 25.4, 4)} mm · ${angle}` : `${px} · ${angle}`;
+}
+
+function setMeasuring(on: boolean): void {
+  measure.on = on;
+  measure.a = measure.b = measure.hover = null;
+  measureButton.setAttribute('aria-pressed', String(on));
+  canvas.classList.toggle('measuring', on);
+  viewer.redrawOverlay();
+}
+
+const findButton = $<HTMLButtonElement>('find');
+const findBar = $('find-bar');
+const findInput = $<HTMLInputElement>('find-input');
+const findCount = $('find-count');
+
+/** Text matches of the find bar, and the one shown. */
+const find = { hits: [] as TextHit[], index: 0 };
+
+/** Matches as highlighter marks; the current one outlined. */
+function paintHits(ctx: CanvasRenderingContext2D, view: View): void {
+  const dpr = window.devicePixelRatio || 1;
+  find.hits.forEach((hit, i) => {
+    ctx.beginPath();
+    for (const [x, y] of hit.corners) ctx.lineTo((x - view.x) * view.scale, (y - view.y) * view.scale);
+    ctx.closePath();
+    ctx.fillStyle = i === find.index ? 'rgb(255 214 10 / 0.55)' : 'rgb(255 214 10 / 0.3)';
+    ctx.fill();
+    if (i !== find.index) return;
+    ctx.lineWidth = 2 * dpr;
+    ctx.strokeStyle = '#ff9f0a';
+    ctx.stroke();
+  });
+}
+
+function runFind(): void {
+  const doc = current?.doc;
+  find.hits = doc?.kind === 'vector' ? doc.findText(findInput.value.trim()) : [];
+  find.index = 0;
+  showHit();
+}
+
+/** Moves to match `index` (wrapping around) and updates the counter. */
+function showHit(index = find.index): void {
+  const n = find.hits.length;
+  find.index = n ? (index + n) % n : 0;
+  findCount.textContent = !findInput.value.trim() ? '' : n ? `${find.index + 1} of ${n}` : 'No match';
+  const hit = find.hits[find.index];
+  if (hit) {
+    const xs = hit.corners.map((c) => c[0]);
+    const ys = hit.corners.map((c) => c[1]);
+    const [x, y] = [Math.min(...xs), Math.min(...ys)];
+    viewer.showRegion(x, y, Math.max(...xs) - x, Math.max(...ys) - y);
+  }
+  viewer.redrawOverlay();
+}
+
+function toggleFind(open = !findBar.classList.contains('open')): void {
+  findBar.classList.toggle('open', open);
+  findBar.inert = !open;
+  findButton.setAttribute('aria-pressed', String(open));
+  if (open) {
+    findInput.select();
+    findInput.focus();
+  } else {
+    find.hits = [];
+    findInput.blur();
+    viewer.redrawOverlay();
+  }
+}
+
+findButton.addEventListener('click', () => toggleFind());
+findInput.addEventListener('input', runFind);
+findInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') showHit(find.index + (e.shiftKey ? -1 : 1));
+  else if (e.key === 'Escape') toggleFind(false);
+  else return;
+  e.preventDefault();
 });
+$('find-prev').addEventListener('click', () => showHit(find.index - 1));
+$('find-next').addEventListener('click', () => showHit(find.index + 1));
+$('find-close').addEventListener('click', () => toggleFind(false));
+
+const viewer = new Viewer(canvas, $<HTMLCanvasElement>('overlay'), paintOverlay, (view) => {
+  // Raster: image pixels per device pixel, so 100% is 1:1. Vector: relative to fit, as drawing units have no screen size.
+  const zoom = viewer.document?.kind === 'vector' ? viewer.fitRatio() : view.scale;
+  zoomLabel.textContent = `${Math.round(zoom * 100)}%`;
+  minimap.update();
+});
+const minimapEl = $('minimap');
+const minimap = new Minimap(minimapEl, minimapEl.querySelector('canvas')!, viewer);
 
 function findPlugin(name: string, bytes: Uint8Array): FormatPlugin | undefined {
   const ext = name.split('.').pop()?.toLowerCase() ?? '';
@@ -50,8 +203,10 @@ interface OpenFile {
   plugin: FormatPlugin;
 }
 
+type Rows = [string, string][];
+
 /** The file on screen, kept so its other pages can be opened and its properties shown. */
-let current: (OpenFile & { page: number; pageCount: number; info: [string, string][] }) | null = null;
+let current: (OpenFile & { page: number; pageCount: number; info: Rows; formatInfo: Rows; doc: DrawingDocument }) | null = null;
 
 const number = (n: number, digits = 6) => Number(n.toPrecision(digits)).toLocaleString('en-US');
 
@@ -63,9 +218,9 @@ function fileSize(bytes: number): string {
   return i === 0 ? `${bytes} bytes` : `${short} ${units[i]} (${bytes.toLocaleString('en-US')} bytes)`;
 }
 
-/** Rows for the file information dialog: general properties, then the format's own. */
-function fileInfo(file: OpenFile, doc: DrawingDocument, page: number): [string, string][] {
-  const rows: [string, string][] = [
+/** General rows for the file information sheet; the format's own rows are `doc.info`. */
+function fileInfo(file: OpenFile, doc: DrawingDocument, page: number): Rows {
+  const rows: Rows = [
     ['File', file.name],
     ['File size', fileSize(file.bytes.length)],
     ['Format', file.plugin.name],
@@ -80,27 +235,58 @@ function fileInfo(file: OpenFile, doc: DrawingDocument, page: number): [string, 
   } else {
     rows.push(['Extents', `${number(doc.width)} × ${number(doc.height)} ${doc.units || 'units'}`]);
   }
-  return [...rows, ...doc.info];
+  return rows;
+}
+
+/** A table of label/value rows. Values come from the file: set them as text, never as HTML. */
+function rowsTable(rows: [string | Node, string][]): HTMLTableElement {
+  const table = document.createElement('table');
+  for (const [label, value] of rows) {
+    const row = table.appendChild(document.createElement('tr'));
+    row.appendChild(document.createElement('th')).append(label);
+    row.appendChild(document.createElement('td')).textContent = value;
+  }
+  return table;
+}
+
+function infoSection(heading: string, rows: Rows): HTMLElement[] {
+  const h3 = document.createElement('h3');
+  h3.textContent = heading;
+  return [h3, rowsTable(rows)];
 }
 
 function showInfo(): void {
   if (!current) return;
-  // Values come from the file: set them as text, never as HTML.
-  infoTable.replaceChildren(
-    ...current.info.map(([label, value]) => {
-      const row = document.createElement('tr');
-      const th = row.appendChild(document.createElement('th'));
-      const td = row.appendChild(document.createElement('td'));
-      th.textContent = label;
-      td.textContent = value;
-      return row;
-    }),
-  );
+  const sections = infoSection('General', current.info);
+  if (current.formatInfo.length) sections.push(...infoSection(current.plugin.name, current.formatInfo));
+  infoBody.replaceChildren(...sections);
   infoDialog.showModal();
+}
+
+let toastTimer = 0;
+
+/** Shows `message` in the toast; it hides itself after `ms` unless `ms` is 0. */
+function toast(message: string, { error = false, ms = 4000 } = {}): void {
+  clearTimeout(toastTimer);
+  toastEl.textContent = message;
+  toastEl.classList.toggle('error', error);
+  toastEl.classList.add('show');
+  if (ms) toastTimer = setTimeout(hideToast, ms);
+}
+
+function hideToast(): void {
+  clearTimeout(toastTimer);
+  toastEl.classList.remove('show');
 }
 
 /** Layer rows of the document on screen, with their checkboxes. */
 let layerRows: { layer: Layer; row: HTMLLabelElement; box: HTMLInputElement }[] = [];
+
+/** Shows only `layer`. */
+function solo(layer: Layer): void {
+  layerRows.forEach((r) => (r.layer.visible = r.layer === layer));
+  syncLayers();
+}
 
 function showLayers(layers: Layer[]): void {
   layerRows = layers.map((layer) => {
@@ -108,16 +294,25 @@ function showLayers(layers: Layer[]): void {
     const box = row.appendChild(document.createElement('input'));
     const swatch = row.appendChild(document.createElement('span'));
     const name = row.appendChild(document.createElement('span'));
+    const only = row.appendChild(document.createElement('button'));
+    row.className = 'layer';
     box.type = 'checkbox';
     box.checked = layer.visible;
     swatch.className = 'swatch';
     swatch.style.background = layer.color;
+    name.className = 'name';
     // Layer names come from the file: set them as text, never as HTML.
     name.textContent = name.title = layer.name;
+    only.textContent = 'Only';
+    only.title = 'Show only this layer (Alt-click the checkbox)';
     box.addEventListener('click', (e) => {
-      if (e.altKey) layerRows.forEach((r) => (r.layer.visible = r.layer === layer));
-      else layer.visible = box.checked;
+      if (e.altKey) return solo(layer);
+      layer.visible = box.checked;
       syncLayers();
+    });
+    only.addEventListener('click', (e) => {
+      e.preventDefault();
+      solo(layer);
     });
     return { layer, row, box };
   });
@@ -127,7 +322,10 @@ function showLayers(layers: Layer[]): void {
 
 function syncLayers(): void {
   layerRows.forEach((r) => (r.box.checked = r.layer.visible));
+  const on = layerRows.filter((r) => r.layer.visible).length;
+  layerCount.textContent = `${on} of ${layerRows.length} shown`;
   viewer.redraw();
+  minimap.invalidate();
 }
 
 function filterLayers(): void {
@@ -141,33 +339,41 @@ function setLayers(visible: boolean): void {
   syncLayers();
 }
 
-function toggleLayersPanel(open = layersPanel.hidden): void {
-  layersPanel.hidden = !open;
+function toggleLayersPanel(open = !layersPanel.classList.contains('open')): void {
+  layersPanel.classList.toggle('open', open);
+  layersPanel.inert = !open;
   layersButton.setAttribute('aria-pressed', String(open));
 }
 
 function showError(name: string, err: unknown): void {
-  status.textContent = `${name}: ${err instanceof Error ? err.message : String(err)}`;
-  status.classList.add('error');
+  toast(`${name}: ${err instanceof Error ? err.message : String(err)}`, { error: true, ms: 8000 });
 }
 
 /** Shows page `page` of `file`; on failure the current document stays on screen. */
 function showPage(file: OpenFile, page: number): void {
   try {
     const doc = file.plugin.open(file.bytes, page);
-    current = { ...file, page, pageCount: doc.pageCount, info: fileInfo(file, doc, page) };
-    status.textContent = file.name;
-    status.classList.remove('error');
+    current = { ...file, page, pageCount: doc.pageCount, info: fileInfo(file, doc, page), formatInfo: doc.info, doc };
+    title.textContent = title.title = file.name;
+    document.title = `${file.name} – Drawing Viewer`;
+    hideToast();
     pager.hidden = doc.pageCount < 2;
     actualSize.hidden = doc.kind !== 'raster';
-    infoButton.disabled = false;
     const layers = doc.kind === 'vector' ? doc.layers : [];
     layersButton.hidden = layers.length === 0;
     if (layersButton.hidden) toggleLayersPanel(false);
     showLayers(layers);
+    syncLayers();
+    measure.a = measure.b = measure.hover = null;
+    findButton.hidden = weightButton.hidden = doc.kind !== 'vector';
+    if (doc.kind === 'vector') doc.lineScale = lineScale;
+    if (findButton.hidden) toggleFind(false);
     pageLabel.textContent = `${page + 1} / ${doc.pageCount}`;
-    hint.hidden = true;
+    start.hidden = true;
+    document.body.classList.add('has-doc');
     viewer.setDocument(doc);
+    minimap.invalidate();
+    if (findBar.classList.contains('open')) runFind();
   } catch (err) {
     showError(file.name, err);
   }
@@ -178,10 +384,15 @@ function turnPage(delta: number): void {
   if (current && page >= 0 && page < current.pageCount) showPage(current, page);
 }
 
+/** Files above this size get a progress toast; decoding blocks the page, so it must be painted first. */
+const SLOW_FILE = 1 << 20;
+
 async function openFile(file: File): Promise<void> {
-  status.textContent = `Loading ${file.name}…`;
-  status.classList.remove('error');
   try {
+    if (file.size > SLOW_FILE) {
+      toast(`Opening ${file.name}…`, { ms: 0 });
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+    }
     const bytes = new Uint8Array(await file.arrayBuffer());
     const plugin = findPlugin(file.name, bytes);
     if (!plugin) throw new Error('Unsupported file format');
@@ -191,29 +402,219 @@ async function openFile(file: File): Promise<void> {
   }
 }
 
+/** Decimals that resolve `step` (the size of a screen pixel), within reason. */
+const decimals = (step: number) => Math.min(6, Math.max(0, Math.ceil(-Math.log10(step))));
+
+/** A drawing point in world coordinates, as text: X, Y with unit, and an optional physical size. */
+function worldPoint(doc: DrawingDocument, x: number, y: number, pixel: number): { x: string; y: string; unit: string; extra?: string } {
+  if (doc.kind === 'vector') {
+    const d = decimals(pixel);
+    return { x: (doc.origin[0] + x).toFixed(d), y: (doc.origin[1] - y).toFixed(d), unit: doc.units };
+  }
+  const mm = (px: number) => ((px / doc.dpi) * 25.4).toFixed(1);
+  const extra = doc.dpi ? `${mm(x)}, ${mm(y)} mm` : undefined;
+  return { x: Math.floor(x).toString(), y: Math.floor(y).toString(), unit: 'px', extra };
+}
+
+function showCoords(e: PointerEvent): void {
+  if (!current) return;
+  const { x, y, pixel } = viewer.toDrawing(e);
+  const p = worldPoint(current.doc, x, y, pixel);
+  const label = (text: string) => Object.assign(document.createElement('b'), { textContent: text });
+  const tail = [p.unit, p.extra].filter(Boolean).join(' · ');
+  coords.replaceChildren(label('X'), p.x, label('Y'), p.y, tail ? ` ${tail}` : '');
+  coords.hidden = false;
+}
+
+canvas.addEventListener('pointermove', (e) => {
+  showCoords(e);
+  if (measure.on && measure.a && !measure.b) {
+    measure.hover = viewer.toDrawing(e);
+    viewer.redrawOverlay();
+  }
+});
+viewer.onTap = (e) => {
+  if (!measure.on) return;
+  const p = viewer.toDrawing(e);
+  if (measure.a && !measure.b) measure.b = p;
+  else [measure.a, measure.b, measure.hover] = [p, null, null];
+  viewer.redrawOverlay();
+};
+measureButton.addEventListener('click', () => setMeasuring(!measure.on));
+
+/** Saves the view as shown, measurements included, as a PNG next to the file's name. */
+function exportView(): void {
+  if (!current) return;
+  const image = document.createElement('canvas');
+  image.width = canvas.width;
+  image.height = canvas.height;
+  const ctx = image.getContext('2d')!;
+  ctx.drawImage(canvas, 0, 0);
+  ctx.drawImage($<HTMLCanvasElement>('overlay'), 0, 0);
+  const base = current.name.replace(/\.[^.]*$/, '');
+  const name = `${base}${current.pageCount > 1 ? `-page${current.page + 1}` : ''}.png`;
+  image.toBlob((blob) => {
+    if (!blob) return showError(name, new Error('Could not create the image'));
+    const link = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: name });
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+    toast(`Saved ${name}`);
+  }, 'image/png');
+}
+
+$('export').addEventListener('click', exportView);
+canvas.addEventListener('pointerleave', () => (coords.hidden = true));
+
 fileInput.addEventListener('change', () => {
   const file = fileInput.files?.[0];
   if (file) openFile(file);
   fileInput.value = '';
 });
 
+$('open').addEventListener('click', () => fileInput.click());
+$('start-open').addEventListener('click', () => fileInput.click());
+toastEl.addEventListener('click', hideToast);
 $('zoom-in').addEventListener('click', () => viewer.zoomIn());
 $('zoom-out').addEventListener('click', () => viewer.zoomOut());
 $('fit').addEventListener('click', () => viewer.fit());
 actualSize.addEventListener('click', () => viewer.actualSize());
 $('prev-page').addEventListener('click', () => turnPage(-1));
 $('next-page').addEventListener('click', () => turnPage(1));
-infoButton.addEventListener('click', showInfo);
+$('info').addEventListener('click', showInfo);
 layersButton.addEventListener('click', () => toggleLayersPanel());
 layerFilter.addEventListener('input', filterLayers);
 $('layers-on').addEventListener('click', () => setLayers(true));
 $('layers-off').addEventListener('click', () => setLayers(false));
 // A click on the backdrop lands on the dialog itself; clicks on its content land on the form.
-infoDialog.addEventListener('click', (e) => {
-  if (e.target === infoDialog) infoDialog.close();
-});
+document.querySelectorAll('dialog').forEach((dialog) =>
+  dialog.addEventListener('click', (e) => {
+    if (e.target === dialog) dialog.close();
+  }),
+);
 const invert = $('invert');
-invert.addEventListener('click', () => invert.setAttribute('aria-pressed', String(viewer.toggleInvert())));
+/** Line width choices: multipliers of the widths in the file. The choice carries over to the next file. */
+const LINE_SCALES = [
+  { scale: 0.25, label: 'Very Thin' },
+  { scale: 0.5, label: 'Thin' },
+  { scale: 1, label: 'Normal' },
+  { scale: 2, label: 'Bold' },
+];
+const weightButton = $<HTMLButtonElement>('weight');
+const weightMenu = $('weight-menu');
+let lineScale = 1;
+
+const weightItems = LINE_SCALES.map(({ scale, label }) => {
+  const item = document.createElement('button');
+  item.role = 'menuitemradio';
+  item.innerHTML = '<svg class="icon" aria-hidden="true"><use href="#i-check" /></svg><span></span><small></small>';
+  item.querySelector('span')!.textContent = label;
+  item.querySelector('small')!.textContent = `${scale}×`;
+  item.addEventListener('click', () => {
+    setLineScale(scale);
+    weightMenu.hidePopover();
+  });
+  return item;
+});
+weightMenu.replaceChildren(...weightItems);
+
+function setLineScale(scale: number): void {
+  lineScale = scale;
+  // Highlighted while it differs from the file, like the other view toggles.
+  weightButton.setAttribute('aria-pressed', String(scale !== 1));
+  weightItems.forEach((item, i) => item.setAttribute('aria-checked', String(LINE_SCALES[i].scale === scale)));
+  if (current?.doc.kind === 'vector') current.doc.lineScale = scale;
+  viewer.redraw();
+  minimap.invalidate();
+}
+setLineScale(1);
+
+/** Next line width, wrapping from Bold back to Very Thin. */
+function cycleLineScale(): void {
+  const i = LINE_SCALES.findIndex((s) => s.scale === lineScale);
+  setLineScale(LINE_SCALES[(i + 1) % LINE_SCALES.length].scale);
+}
+
+// Hang the menu under its button, centred on it.
+weightMenu.addEventListener('beforetoggle', (e) => {
+  if ((e as ToggleEvent).newState !== 'open') return;
+  const rect = weightButton.getBoundingClientRect();
+  weightMenu.style.top = `${rect.bottom + 8}px`;
+  weightMenu.style.left = `${rect.left + rect.width / 2}px`;
+});
+
+const toggleInvert = () => {
+  invert.setAttribute('aria-pressed', String(viewer.toggleInvert()));
+  minimap.invalidate();
+};
+invert.addEventListener('click', toggleInvert);
+
+const mac = /Mac|iPhone|iPad/.test(navigator.userAgent);
+
+interface Shortcut {
+  /** `KeyboardEvent.key` values, lower case for letters; "Mod+" means Cmd on a Mac, Ctrl elsewhere. */
+  keys: string[];
+  label: string;
+  run: () => void;
+  /** Whether it applies now; by default, when a drawing is open. */
+  when?: () => boolean;
+  /** Toolbar button whose tooltip gets the first key. */
+  button?: string;
+}
+
+const always = () => true;
+const shortcuts: Shortcut[] = [
+  { keys: ['Mod+o'], label: 'Open a drawing', run: () => fileInput.click(), when: always, button: 'open' },
+  { keys: ['+', '='], label: 'Zoom in', run: () => viewer.zoomIn(), button: 'zoom-in' },
+  { keys: ['-'], label: 'Zoom out', run: () => viewer.zoomOut(), button: 'zoom-out' },
+  { keys: ['0'], label: 'Fit to window', run: () => viewer.fit(), button: 'fit' },
+  { keys: ['1'], label: 'Actual pixels', run: () => viewer.actualSize(), when: () => !!current && !actualSize.hidden, button: 'actual' },
+  { keys: ['i'], label: 'Swap black and white', run: toggleInvert, button: 'invert' },
+  { keys: ['w'], label: 'Next line width', run: cycleLineScale, when: () => !weightButton.hidden, button: 'weight' },
+  { keys: ['l'], label: 'Show or hide layers', run: () => toggleLayersPanel(), when: () => !layersButton.hidden, button: 'layers' },
+  { keys: ['ArrowLeft', 'PageUp'], label: 'Previous page', run: () => turnPage(-1), button: 'prev-page' },
+  { keys: ['ArrowRight', 'PageDown'], label: 'Next page', run: () => turnPage(1), button: 'next-page' },
+  { keys: ['Mod+s'], label: 'Save view as PNG', run: exportView, button: 'export' },
+  { keys: ['Mod+f'], label: 'Find text', run: () => toggleFind(true), when: () => !findButton.hidden, button: 'find' },
+  { keys: ['m'], label: 'Measure distance', run: () => setMeasuring(!measure.on), button: 'measure' },
+  { keys: ['Escape'], label: 'Stop measuring', run: () => setMeasuring(false), when: () => measure.on },
+  { keys: ['?'], label: 'Keyboard shortcuts', run: () => keysDialog.showModal(), when: always },
+];
+
+const KEY_NAMES: Record<string, string> = { Escape: 'Esc', ArrowLeft: '←', ArrowRight: '→', PageUp: 'Page Up', PageDown: 'Page Down' };
+
+function keyName(key: string): string {
+  const name = key.replace('Mod+', '');
+  const shown = KEY_NAMES[name] ?? name.toUpperCase();
+  return key.startsWith('Mod+') ? (mac ? `⌘${shown}` : `Ctrl+${shown}`) : shown;
+}
+
+const keysDialog = $<HTMLDialogElement>('keys-dialog');
+$('keys-body').replaceChildren(
+  rowsTable(
+    shortcuts.map((s) => {
+      const keys = document.createDocumentFragment();
+      s.keys.forEach((k) => (keys.appendChild(document.createElement('kbd')).textContent = keyName(k)));
+      return [keys, s.label];
+    }),
+  ),
+);
+for (const s of shortcuts) {
+  const button = s.button && document.getElementById(s.button);
+  if (button) button.title += ` (${keyName(s.keys[0])})`;
+}
+
+document.addEventListener('keydown', (e) => {
+  const target = e.target as HTMLElement;
+  // Typing in a text field, or a sheet that is open, keeps its keys.
+  if (e.altKey || target.matches('input[type=search], input[type=text], textarea') || document.querySelector('dialog[open]')) return;
+  const mod = mac ? e.metaKey : e.ctrlKey;
+  if (mac ? e.ctrlKey : e.metaKey) return;
+  const key = (mod ? 'Mod+' : '') + (e.key.length === 1 ? e.key.toLowerCase() : e.key);
+  const shortcut = shortcuts.find((s) => s.keys.includes(key));
+  if (!shortcut || !(shortcut.when ?? (() => !!current))()) return;
+  e.preventDefault();
+  shortcut.run();
+});
 
 document.addEventListener('dragover', (e) => {
   e.preventDefault();
