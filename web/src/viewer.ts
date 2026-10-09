@@ -64,7 +64,8 @@ export class Viewer {
     this.ctx = canvas.getContext('2d')!;
     this.overlayCtx = overlay.getContext('2d')!;
     new ResizeObserver(() => {
-      if (this.syncSize()) this.redraw();
+      // The fitted scale depends on the canvas size, so listeners that show zoom relative to fit must hear of it.
+      if (this.syncSize()) this.setView(this.view);
     }).observe(canvas);
     canvas.addEventListener('wheel', (e) => this.onWheel(e), { passive: false });
     canvas.addEventListener('pointerdown', (e) => this.onPointerDown(e));
