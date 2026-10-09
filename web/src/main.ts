@@ -3,7 +3,7 @@ import { dwf } from './formats/dwf';
 import { dwg, dxf } from './formats/dxf';
 import { hpgl } from './formats/hpgl';
 import { tiff } from './formats/tiff';
-import type { DrawingDocument, FormatPlugin, Layer } from './formats/types';
+import type { DrawingDocument, FormatPlugin, Layer, View } from './formats/types';
 import { Viewer } from './viewer';
 
 // HP-GL has no signature, so its loose sniff goes last.
@@ -38,7 +38,78 @@ $('formats').replaceChildren(
   }),
 );
 
-const viewer = new Viewer(canvas, (view) => {
+const measureButton = $('measure');
+
+/** Measure tool: first and second point in drawing coordinates, and the pointer while placing the second. */
+const measure = { on: false, a: null as Point | null, b: null as Point | null, hover: null as Point | null };
+type Point = { x: number; y: number };
+
+const ACCENT = '#0a84ff';
+
+function paintOverlay(ctx: CanvasRenderingContext2D, view: View): void {
+  const { a } = measure;
+  const b = measure.b ?? measure.hover;
+  if (!current || !a) return;
+  const dpr = window.devicePixelRatio || 1;
+  const screen = (p: Point): [number, number] => [(p.x - view.x) * view.scale, (p.y - view.y) * view.scale];
+  const [ax, ay] = screen(a);
+  ctx.lineWidth = 2 * dpr;
+  ctx.strokeStyle = ACCENT;
+  ctx.fillStyle = '#fff';
+  if (b) {
+    const [bx, by] = screen(b);
+    ctx.beginPath();
+    ctx.moveTo(ax, ay);
+    ctx.lineTo(bx, by);
+    ctx.stroke();
+    dot(ctx, bx, by, dpr);
+    label(ctx, distanceText(current.doc, a, b), (ax + bx) / 2, (ay + by) / 2, dpr);
+  }
+  dot(ctx, ax, ay, dpr);
+}
+
+function dot(ctx: CanvasRenderingContext2D, x: number, y: number, dpr: number): void {
+  ctx.beginPath();
+  ctx.arc(x, y, 4 * dpr, 0, 2 * Math.PI);
+  ctx.fill();
+  ctx.stroke();
+}
+
+/** A pill-shaped label centred on (x, y), in device pixels. */
+function label(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, dpr: number): void {
+  ctx.font = `600 ${12 * dpr}px system-ui, sans-serif`;
+  const w = ctx.measureText(text).width + 16 * dpr;
+  const h = 22 * dpr;
+  ctx.fillStyle = ACCENT;
+  ctx.beginPath();
+  ctx.roundRect(x - w / 2, y - h / 2, w, h, h / 2);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, x, y);
+}
+
+/** Length and angle of a → b in the document's units; angles count counter-clockwise from +X. */
+function distanceText(doc: DrawingDocument, a: Point, b: Point): string {
+  const dx = b.x - a.x;
+  const dy = a.y - b.y;
+  const length = Math.hypot(dx, dy);
+  const angle = `${(((Math.atan2(dy, dx) * 180) / Math.PI + 360) % 360).toFixed(1)}°`;
+  if (doc.kind === 'vector') return `${number(length)} ${doc.units}`.trim() + ` · ${angle}`;
+  const px = `${number(length, 4)} px`;
+  return doc.dpi ? `${px} · ${number((length / doc.dpi) * 25.4, 4)} mm · ${angle}` : `${px} · ${angle}`;
+}
+
+function setMeasuring(on: boolean): void {
+  measure.on = on;
+  measure.a = measure.b = measure.hover = null;
+  measureButton.setAttribute('aria-pressed', String(on));
+  canvas.classList.toggle('measuring', on);
+  viewer.redrawOverlay();
+}
+
+const viewer = new Viewer(canvas, $<HTMLCanvasElement>('overlay'), paintOverlay, (view) => {
   zoomLabel.textContent = `${Math.round(view.scale * 100)}%`;
 });
 
@@ -213,6 +284,7 @@ function showPage(file: OpenFile, page: number): void {
     if (layersButton.hidden) toggleLayersPanel(false);
     showLayers(layers);
     syncLayers();
+    measure.a = measure.b = measure.hover = null;
     pageLabel.textContent = `${page + 1} / ${doc.pageCount}`;
     start.hidden = true;
     document.body.classList.add('has-doc');
@@ -269,7 +341,21 @@ function showCoords(e: PointerEvent): void {
   coords.hidden = false;
 }
 
-canvas.addEventListener('pointermove', showCoords);
+canvas.addEventListener('pointermove', (e) => {
+  showCoords(e);
+  if (measure.on && measure.a && !measure.b) {
+    measure.hover = viewer.toDrawing(e);
+    viewer.redrawOverlay();
+  }
+});
+viewer.onTap = (e) => {
+  if (!measure.on) return;
+  const p = viewer.toDrawing(e);
+  if (measure.a && !measure.b) measure.b = p;
+  else [measure.a, measure.b, measure.hover] = [p, null, null];
+  viewer.redrawOverlay();
+};
+measureButton.addEventListener('click', () => setMeasuring(!measure.on));
 canvas.addEventListener('pointerleave', () => (coords.hidden = true));
 
 fileInput.addEventListener('change', () => {
@@ -326,10 +412,12 @@ const shortcuts: Shortcut[] = [
   { keys: ['l'], label: 'Show or hide layers', run: () => toggleLayersPanel(), when: () => !layersButton.hidden, button: 'layers' },
   { keys: ['ArrowLeft', 'PageUp'], label: 'Previous page', run: () => turnPage(-1), button: 'prev-page' },
   { keys: ['ArrowRight', 'PageDown'], label: 'Next page', run: () => turnPage(1), button: 'next-page' },
+  { keys: ['m'], label: 'Measure distance', run: () => setMeasuring(!measure.on), button: 'measure' },
+  { keys: ['Escape'], label: 'Stop measuring', run: () => setMeasuring(false), when: () => measure.on },
   { keys: ['?'], label: 'Keyboard shortcuts', run: () => keysDialog.showModal(), when: always },
 ];
 
-const KEY_NAMES: Record<string, string> = { ArrowLeft: '←', ArrowRight: '→', PageUp: 'Page Up', PageDown: 'Page Down' };
+const KEY_NAMES: Record<string, string> = { Escape: 'Esc', ArrowLeft: '←', ArrowRight: '→', PageUp: 'Page Up', PageDown: 'Page Down' };
 
 function keyName(key: string): string {
   const name = key.replace('Mod+', '');
@@ -354,7 +442,8 @@ for (const s of shortcuts) {
 
 document.addEventListener('keydown', (e) => {
   const target = e.target as HTMLElement;
-  if (e.altKey || target.closest('input, dialog') || document.querySelector('dialog[open]')) return;
+  // Typing in a text field, or a sheet that is open, keeps its keys.
+  if (e.altKey || target.matches('input[type=search], input[type=text], textarea') || document.querySelector('dialog[open]')) return;
   const mod = mac ? e.metaKey : e.ctrlKey;
   if (mac ? e.ctrlKey : e.metaKey) return;
   const key = (mod ? 'Mod+' : '') + (e.key.length === 1 ? e.key.toLowerCase() : e.key);

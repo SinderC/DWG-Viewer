@@ -16,6 +16,8 @@ const DECELERATION = 0.998;
 const MIN_FLICK = 60;
 /** Pointer samples older than this are ignored when measuring release velocity. */
 const VELOCITY_WINDOW = 100;
+/** A press that moves less than this, in CSS pixels, is a tap rather than a drag. */
+const TAP_SLOP = 4;
 /** Frames slower than this make view changes jump instead of animate. */
 const SLOW_FRAME_MS = 25;
 
@@ -24,9 +26,19 @@ const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
 /** Advances an animation by `dt` seconds; returns false once it has finished. */
 type Motion = (dt: number) => boolean;
 
+/** Draws on the transparent overlay canvas, in device pixels; it has been cleared. */
+export type OverlayPainter = (ctx: CanvasRenderingContext2D, view: View) => void;
+
 /** Canvas viewer: mouse wheel zooms around the cursor, left-drag pans (with momentum), double-click fits. */
 export class Viewer {
+  /** Called for a click or tap that did not pan. */
+  onTap: ((e: PointerEvent) => void) | null = null;
   private readonly ctx: CanvasRenderingContext2D;
+  private readonly overlayCtx: CanvasRenderingContext2D;
+  /** Whether the next frame must repaint the document, or only the overlay. */
+  private docDirty = false;
+  /** Where the press in progress started, to tell taps from drags. */
+  private press: { x: number; y: number; moved: boolean } | null = null;
   private doc: DrawingDocument | null = null;
   private view: View = { scale: 1, x: 0, y: 0 };
   /** Recent pointer positions of the drag in progress, in CSS pixels, newest last. */
@@ -41,9 +53,12 @@ export class Viewer {
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
+    private readonly overlay: HTMLCanvasElement,
+    private readonly paintOverlay: OverlayPainter,
     private readonly onViewChange: (view: View) => void,
   ) {
     this.ctx = canvas.getContext('2d')!;
+    this.overlayCtx = overlay.getContext('2d')!;
     new ResizeObserver(() => {
       if (this.syncSize()) this.redraw();
     }).observe(canvas);
@@ -189,8 +204,19 @@ export class Viewer {
   }
 
   redraw(): void {
+    this.docDirty = true;
+    this.redrawOverlay();
+  }
+
+  /** Repaints only the overlay, in the next frame. */
+  redrawOverlay(): void {
     if (this.frame) return;
     this.frame = requestAnimationFrame((now) => this.paint(now));
+  }
+
+  /** The view on screen; `x`, `y` and `scale` map drawing units to device pixels. */
+  get currentView(): View {
+    return this.view;
   }
 
   private paint(now: number): void {
@@ -200,16 +226,22 @@ export class Viewer {
       this.lastTick = now;
       if (!this.motion(dt)) this.motion = null;
     }
-    const started = performance.now();
     const { width, height } = this.canvas;
-    if (this.doc?.kind === 'vector') {
-      this.doc.draw(this.ctx, this.view, this.inverted);
-    } else if (this.doc && width > 0 && height > 0) {
-      this.ctx.putImageData(this.doc.render(this.view, width, height, this.inverted), 0, 0);
-    } else {
-      this.ctx.clearRect(0, 0, width, height);
+    if (this.docDirty) {
+      this.docDirty = false;
+      const started = performance.now();
+      if (this.doc?.kind === 'vector') {
+        this.doc.draw(this.ctx, this.view, this.inverted);
+      } else if (this.doc && width > 0 && height > 0) {
+        this.ctx.putImageData(this.doc.render(this.view, width, height, this.inverted), 0, 0);
+      } else {
+        this.ctx.clearRect(0, 0, width, height);
+      }
+      this.lastFrameMs = performance.now() - started;
     }
-    this.lastFrameMs = performance.now() - started;
+    this.overlayCtx.setTransform(1, 0, 0, 1, 0, 0);
+    this.overlayCtx.clearRect(0, 0, width, height);
+    if (this.doc) this.paintOverlay(this.overlayCtx, this.view);
     this.frame = 0;
     if (this.motion) this.redraw();
   }
@@ -220,8 +252,8 @@ export class Viewer {
     const width = Math.round(this.canvas.clientWidth * dpr);
     const height = Math.round(this.canvas.clientHeight * dpr);
     if (width === this.canvas.width && height === this.canvas.height) return false;
-    this.canvas.width = width;
-    this.canvas.height = height;
+    this.canvas.width = this.overlay.width = width;
+    this.canvas.height = this.overlay.height = height;
     return true;
   }
 
@@ -253,10 +285,14 @@ export class Viewer {
     this.canvas.setPointerCapture(e.pointerId);
     this.canvas.classList.add('dragging');
     this.drag = [{ x: e.clientX, y: e.clientY, t: e.timeStamp }];
+    this.press = { x: e.clientX, y: e.clientY, moved: false };
   }
 
   private onPointerMove(e: PointerEvent): void {
     if (!this.drag) return;
+    if (this.press && Math.hypot(e.clientX - this.press.x, e.clientY - this.press.y) > TAP_SLOP) this.press.moved = true;
+    // Until it is clearly a drag, the drawing stays put so a tap lands where it was aimed.
+    if (this.press && !this.press.moved) return;
     const dpr = window.devicePixelRatio || 1;
     const { scale, x, y } = this.view;
     const last = this.drag[this.drag.length - 1];
@@ -270,8 +306,11 @@ export class Viewer {
   /** On release, the drawing keeps the finger's velocity and decelerates like a scroll view. */
   private endDrag(e?: PointerEvent): void {
     const samples = this.drag?.filter((p) => !e || e.timeStamp - p.t <= VELOCITY_WINDOW);
+    const tap = e && this.press && !this.press.moved;
     this.drag = null;
+    this.press = null;
     this.canvas.classList.remove('dragging');
+    if (tap) return this.onTap?.(e);
     if (!e || !samples || samples.length < 2 || reducedMotion.matches) return;
     const first = samples[0];
     const last = samples[samples.length - 1];

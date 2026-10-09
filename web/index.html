@@ -98,6 +98,8 @@
       main { position: fixed; inset: 0; }
       canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
       canvas.dragging { cursor: grabbing; }
+      canvas.measuring { cursor: crosshair; }
+      #overlay { pointer-events: none; }
       body.drop main::after {
         content: '';
         position: absolute;
@@ -309,6 +311,7 @@
       <symbol id="i-fit" viewBox="0 0 20 20"><path d="M3 7.5v-3A1.5 1.5 0 0 1 4.5 3h3M12.5 3h3A1.5 1.5 0 0 1 17 4.5v3M17 12.5v3a1.5 1.5 0 0 1-1.5 1.5h-3M7.5 17h-3A1.5 1.5 0 0 1 3 15.5v-3" /></symbol>
       <symbol id="i-invert" viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.5" /><path d="M10 3.5a6.5 6.5 0 0 1 0 13z" fill="currentColor" /></symbol>
       <symbol id="i-layers" viewBox="0 0 20 20"><path d="M10 3l7 3.6-7 3.6-7-3.6zM3 10.2l7 3.6 7-3.6M3 13.6l7 3.6 7-3.6" /></symbol>
+      <symbol id="i-ruler" viewBox="0 0 20 20"><path d="M2.8 13.6L13.6 2.8l3.6 3.6L6.4 17.2zM5.8 10.6l1.6 1.6M8.2 8.2l2.2 2.2M10.6 5.8l1.6 1.6" /></symbol>
       <symbol id="i-info" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7" /><path d="M10 9v5" /><circle cx="10" cy="6.4" r="0.5" fill="currentColor" /></symbol>
       <symbol id="i-prev" viewBox="0 0 20 20"><path d="M12 5l-5 5 5 5" /></symbol>
       <symbol id="i-next" viewBox="0 0 20 20"><path d="M8 5l5 5-5 5" /></symbol>
@@ -318,6 +321,7 @@
 
     <main>
       <canvas id="canvas"></canvas>
+      <canvas id="overlay"></canvas>
     </main>
 
     <div id="start">
@@ -352,6 +356,7 @@
       <div class="group doc">
         <button id="invert" title="Swap black and white" aria-label="Invert" aria-pressed="false"><svg class="icon"><use href="#i-invert" /></svg></button>
         <button id="layers" title="Layers" aria-label="Layers" aria-pressed="false" hidden><svg class="icon"><use href="#i-layers" /></svg></button>
+        <button id="measure" title="Measure distance" aria-label="Measure" aria-pressed="false"><svg class="icon"><use href="#i-ruler" /></svg></button>
         <button id="info" title="File information" aria-label="File information"><svg class="icon"><use href="#i-info" /></svg></button>
       </div>
       <div class="group doc" id="pager" hidden>
