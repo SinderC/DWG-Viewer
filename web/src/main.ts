@@ -494,6 +494,7 @@ document.querySelectorAll('dialog').forEach((dialog) =>
 const invert = $('invert');
 /** Line width choices: multipliers of the widths in the file. The choice carries over to the next file. */
 const LINE_SCALES = [
+  { scale: 0.25, label: 'Very Thin' },
   { scale: 0.5, label: 'Thin' },
   { scale: 1, label: 'Normal' },
   { scale: 2, label: 'Bold' },
@@ -527,7 +528,7 @@ function setLineScale(scale: number): void {
 }
 setLineScale(1);
 
-/** Next line width, wrapping from Bold back to Thin. */
+/** Next line width, wrapping from Bold back to Very Thin. */
 function cycleLineScale(): void {
   const i = LINE_SCALES.findIndex((s) => s.scale === lineScale);
   setLineScale(LINE_SCALES[(i + 1) % LINE_SCALES.length].scale);
