@@ -33,6 +33,8 @@ export interface VectorDocument {
   height: number;
   /** Length unit ("mm", "in", …), or "" if the file does not say. */
   units: string;
+  /** World coordinates of drawing (0, 0); world Y points up, drawing Y down. */
+  origin: [number, number];
   pageCount: number;
   /** Format-specific properties (version, layers, …) as label/value rows. */
   info: [string, string][];

@@ -217,6 +217,7 @@ export function vectorDocument(doc: DxfDoc): VectorDocument {
       width: doc.width,
       height: doc.height,
       units: doc.units,
+      origin: [doc.origin()[0], doc.origin()[1]],
       pageCount: doc.pageCount,
       info: infoRows(doc.info()),
       layers: layerList,

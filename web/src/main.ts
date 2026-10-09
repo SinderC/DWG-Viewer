@@ -25,6 +25,8 @@ const layersPanel = $('layers-panel');
 const layerFilter = $<HTMLInputElement>('layer-filter');
 const layerList = $('layer-list');
 const layerCount = $('layer-count');
+const coords = $('coords');
+const canvas = $<HTMLCanvasElement>('canvas');
 
 fileInput.accept = plugins.flatMap((p) => p.extensions.map((e) => `.${e}`)).join(',');
 $('formats').replaceChildren(
@@ -36,7 +38,7 @@ $('formats').replaceChildren(
   }),
 );
 
-const viewer = new Viewer($<HTMLCanvasElement>('canvas'), (view) => {
+const viewer = new Viewer(canvas, (view) => {
   zoomLabel.textContent = `${Math.round(view.scale * 100)}%`;
 });
 
@@ -54,7 +56,7 @@ interface OpenFile {
 type Rows = [string, string][];
 
 /** The file on screen, kept so its other pages can be opened and its properties shown. */
-let current: (OpenFile & { page: number; pageCount: number; info: Rows; formatInfo: Rows }) | null = null;
+let current: (OpenFile & { page: number; pageCount: number; info: Rows; formatInfo: Rows; doc: DrawingDocument }) | null = null;
 
 const number = (n: number, digits = 6) => Number(n.toPrecision(digits)).toLocaleString('en-US');
 
@@ -200,7 +202,7 @@ function showError(name: string, err: unknown): void {
 function showPage(file: OpenFile, page: number): void {
   try {
     const doc = file.plugin.open(file.bytes, page);
-    current = { ...file, page, pageCount: doc.pageCount, info: fileInfo(file, doc, page), formatInfo: doc.info };
+    current = { ...file, page, pageCount: doc.pageCount, info: fileInfo(file, doc, page), formatInfo: doc.info, doc };
     title.textContent = title.title = file.name;
     document.title = `${file.name} – Drawing Viewer`;
     hideToast();
@@ -242,6 +244,33 @@ async function openFile(file: File): Promise<void> {
     showError(file.name, err);
   }
 }
+
+/** Decimals that resolve `step` (the size of a screen pixel), within reason. */
+const decimals = (step: number) => Math.min(6, Math.max(0, Math.ceil(-Math.log10(step))));
+
+/** A drawing point in world coordinates, as text: X, Y with unit, and an optional physical size. */
+function worldPoint(doc: DrawingDocument, x: number, y: number, pixel: number): { x: string; y: string; unit: string; extra?: string } {
+  if (doc.kind === 'vector') {
+    const d = decimals(pixel);
+    return { x: (doc.origin[0] + x).toFixed(d), y: (doc.origin[1] - y).toFixed(d), unit: doc.units };
+  }
+  const mm = (px: number) => ((px / doc.dpi) * 25.4).toFixed(1);
+  const extra = doc.dpi ? `${mm(x)}, ${mm(y)} mm` : undefined;
+  return { x: Math.floor(x).toString(), y: Math.floor(y).toString(), unit: 'px', extra };
+}
+
+function showCoords(e: PointerEvent): void {
+  if (!current) return;
+  const { x, y, pixel } = viewer.toDrawing(e);
+  const p = worldPoint(current.doc, x, y, pixel);
+  const label = (text: string) => Object.assign(document.createElement('b'), { textContent: text });
+  const tail = [p.unit, p.extra].filter(Boolean).join(' · ');
+  coords.replaceChildren(label('X'), p.x, label('Y'), p.y, tail ? ` ${tail}` : '');
+  coords.hidden = false;
+}
+
+canvas.addEventListener('pointermove', showCoords);
+canvas.addEventListener('pointerleave', () => (coords.hidden = true));
 
 fileInput.addEventListener('change', () => {
   const file = fileInput.files?.[0];

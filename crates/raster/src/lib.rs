@@ -148,6 +148,11 @@ impl DxfDoc {
         self.drawing.height
     }
 
+    /// World coordinates of drawing (0, 0), the top-left of the extents: minimum X, maximum Y.
+    pub fn origin(&self) -> Vec<f64> {
+        self.drawing.origin.to_vec()
+    }
+
     #[wasm_bindgen(getter)]
     pub fn units(&self) -> String {
         self.drawing.units.into()

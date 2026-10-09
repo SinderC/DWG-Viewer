@@ -225,6 +225,13 @@ export class Viewer {
     return true;
   }
 
+  /** Drawing coordinates under the mouse, and the size of one CSS pixel in drawing units. */
+  toDrawing(e: MouseEvent): { x: number; y: number; pixel: number } {
+    const [px, py] = this.devicePoint(e);
+    const { scale, x, y } = this.view;
+    return { x: x + px / scale, y: y + py / scale, pixel: (window.devicePixelRatio || 1) / scale };
+  }
+
   private devicePoint(e: MouseEvent): [number, number] {
     const rect = this.canvas.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
