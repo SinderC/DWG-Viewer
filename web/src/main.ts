@@ -86,17 +86,21 @@ function fileInfo(file: OpenFile, doc: DrawingDocument, page: number): Rows {
   return rows;
 }
 
-/** A titled table of label/value rows. Values come from the file: set them as text, never as HTML. */
-function infoSection(heading: string, rows: Rows): HTMLElement[] {
-  const h3 = document.createElement('h3');
+/** A table of label/value rows. Values come from the file: set them as text, never as HTML. */
+function rowsTable(rows: [string | Node, string][]): HTMLTableElement {
   const table = document.createElement('table');
-  h3.textContent = heading;
   for (const [label, value] of rows) {
     const row = table.appendChild(document.createElement('tr'));
-    row.appendChild(document.createElement('th')).textContent = label;
+    row.appendChild(document.createElement('th')).append(label);
     row.appendChild(document.createElement('td')).textContent = value;
   }
-  return [h3, table];
+  return table;
+}
+
+function infoSection(heading: string, rows: Rows): HTMLElement[] {
+  const h3 = document.createElement('h3');
+  h3.textContent = heading;
+  return [h3, rowsTable(rows)];
 }
 
 function showInfo(): void {
@@ -260,11 +264,76 @@ layerFilter.addEventListener('input', filterLayers);
 $('layers-on').addEventListener('click', () => setLayers(true));
 $('layers-off').addEventListener('click', () => setLayers(false));
 // A click on the backdrop lands on the dialog itself; clicks on its content land on the form.
-infoDialog.addEventListener('click', (e) => {
-  if (e.target === infoDialog) infoDialog.close();
-});
+document.querySelectorAll('dialog').forEach((dialog) =>
+  dialog.addEventListener('click', (e) => {
+    if (e.target === dialog) dialog.close();
+  }),
+);
 const invert = $('invert');
-invert.addEventListener('click', () => invert.setAttribute('aria-pressed', String(viewer.toggleInvert())));
+const toggleInvert = () => invert.setAttribute('aria-pressed', String(viewer.toggleInvert()));
+invert.addEventListener('click', toggleInvert);
+
+const mac = /Mac|iPhone|iPad/.test(navigator.userAgent);
+
+interface Shortcut {
+  /** `KeyboardEvent.key` values, lower case for letters; "Mod+" means Cmd on a Mac, Ctrl elsewhere. */
+  keys: string[];
+  label: string;
+  run: () => void;
+  /** Whether it applies now; by default, when a drawing is open. */
+  when?: () => boolean;
+  /** Toolbar button whose tooltip gets the first key. */
+  button?: string;
+}
+
+const always = () => true;
+const shortcuts: Shortcut[] = [
+  { keys: ['Mod+o'], label: 'Open a drawing', run: () => fileInput.click(), when: always, button: 'open' },
+  { keys: ['+', '='], label: 'Zoom in', run: () => viewer.zoomIn(), button: 'zoom-in' },
+  { keys: ['-'], label: 'Zoom out', run: () => viewer.zoomOut(), button: 'zoom-out' },
+  { keys: ['0'], label: 'Fit to window', run: () => viewer.fit(), button: 'fit' },
+  { keys: ['1'], label: 'Actual pixels', run: () => viewer.actualSize(), when: () => !!current && !actualSize.hidden, button: 'actual' },
+  { keys: ['i'], label: 'Swap black and white', run: toggleInvert, button: 'invert' },
+  { keys: ['l'], label: 'Show or hide layers', run: () => toggleLayersPanel(), when: () => !layersButton.hidden, button: 'layers' },
+  { keys: ['ArrowLeft', 'PageUp'], label: 'Previous page', run: () => turnPage(-1), button: 'prev-page' },
+  { keys: ['ArrowRight', 'PageDown'], label: 'Next page', run: () => turnPage(1), button: 'next-page' },
+  { keys: ['?'], label: 'Keyboard shortcuts', run: () => keysDialog.showModal(), when: always },
+];
+
+const KEY_NAMES: Record<string, string> = { ArrowLeft: '←', ArrowRight: '→', PageUp: 'Page Up', PageDown: 'Page Down' };
+
+function keyName(key: string): string {
+  const name = key.replace('Mod+', '');
+  const shown = KEY_NAMES[name] ?? name.toUpperCase();
+  return key.startsWith('Mod+') ? (mac ? `⌘${shown}` : `Ctrl+${shown}`) : shown;
+}
+
+const keysDialog = $<HTMLDialogElement>('keys-dialog');
+$('keys-body').replaceChildren(
+  rowsTable(
+    shortcuts.map((s) => {
+      const keys = document.createDocumentFragment();
+      s.keys.forEach((k) => (keys.appendChild(document.createElement('kbd')).textContent = keyName(k)));
+      return [keys, s.label];
+    }),
+  ),
+);
+for (const s of shortcuts) {
+  const button = s.button && document.getElementById(s.button);
+  if (button) button.title += ` (${keyName(s.keys[0])})`;
+}
+
+document.addEventListener('keydown', (e) => {
+  const target = e.target as HTMLElement;
+  if (e.altKey || target.closest('input, dialog') || document.querySelector('dialog[open]')) return;
+  const mod = mac ? e.metaKey : e.ctrlKey;
+  if (mac ? e.ctrlKey : e.metaKey) return;
+  const key = (mod ? 'Mod+' : '') + (e.key.length === 1 ? e.key.toLowerCase() : e.key);
+  const shortcut = shortcuts.find((s) => s.keys.includes(key));
+  if (!shortcut || !(shortcut.when ?? (() => !!current))()) return;
+  e.preventDefault();
+  shortcut.run();
+});
 
 document.addEventListener('dragover', (e) => {
   e.preventDefault();

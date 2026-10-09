@@ -215,6 +215,7 @@
       #formats { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; margin: 0; padding: 0; list-style: none; }
       #formats li { padding: 4px 10px; border-radius: 999px; background: var(--field); font-weight: 500; }
       #formats span { margin-left: 6px; color: var(--muted); font-weight: 400; }
+      .card .keys-hint { margin-top: 20px; font-size: 12px; }
       .card footer { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 24px; color: var(--muted); font-size: 12px; }
       .card footer a { display: flex; color: inherit; }
       .card footer a:hover { color: var(--fg); }
@@ -269,6 +270,7 @@
       dialog tr + tr { border-top: 1px solid var(--separator); }
       dialog th { width: 120px; padding: 6px 16px 6px 0; color: var(--muted); font-weight: 400; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
       dialog td { padding: 6px 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+      kbd { display: inline-block; min-width: 22px; margin-right: 4px; padding: 1px 6px; border-radius: 5px; background: var(--field); box-shadow: inset 0 -1px 0 var(--separator); color: var(--fg); font: 500 12px/1.5 system-ui, sans-serif; text-align: center; }
       dialog form > button { align-self: flex-end; margin-top: 16px; }
 
       @media (prefers-reduced-motion: reduce) {
@@ -310,6 +312,7 @@
         <p>Open an engineering drawing, or drop it anywhere on this page.</p>
         <button class="primary" id="start-open">Open Drawing…</button>
         <ul id="formats" aria-label="Supported formats"></ul>
+        <p class="keys-hint">Drag to pan, scroll or pinch to zoom, double-click to fit. Press <kbd>?</kbd> for shortcuts.</p>
         <footer>
           <span>Files are opened locally and never leave this computer.</span>
           <a href="https://github.com/SinderC/DWG-Viewer" target="_blank" rel="noopener" title="Source on GitHub" aria-label="Source on GitHub">
@@ -359,6 +362,14 @@
       <form method="dialog">
         <h2 id="info-title">File Information</h2>
         <div id="info-body"></div>
+        <button class="primary">Done</button>
+      </form>
+    </dialog>
+
+    <dialog id="keys-dialog" class="glass" aria-labelledby="keys-title">
+      <form method="dialog">
+        <h2 id="keys-title">Keyboard Shortcuts</h2>
+        <div id="keys-body"></div>
         <button class="primary">Done</button>
       </form>
     </dialog>
