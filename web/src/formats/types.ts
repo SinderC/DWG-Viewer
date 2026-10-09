@@ -44,6 +44,8 @@ export interface VectorDocument {
   pageCount: number;
   /** Format-specific properties (version, layers, …) as label/value rows. */
   info: [string, string][];
+  /** Set to draw every line one device pixel wide, ignoring line widths; takes effect on the next `draw()`. */
+  thinLines: boolean;
   /** In name order; initially visible unless off or frozen in the file. */
   layers: Layer[];
   /** Draws the whole canvas. `invert` puts the drawing on black instead of white paper. */

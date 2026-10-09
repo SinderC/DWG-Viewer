@@ -243,6 +243,7 @@ export function vectorDocument(doc: DxfDoc): VectorDocument {
       pageCount: doc.pageCount,
       info: infoRows(doc.info()),
       layers: layerList,
+      thinLines: false,
       draw(ctx, view, invert) {
         const { scale, x, y } = view;
         const { width, height } = ctx.canvas;
@@ -261,14 +262,14 @@ export function vectorDocument(doc: DxfDoc): VectorDocument {
           ctx.fill(fill.path, fill.rule);
         }
 
-        // Lines are at least one device pixel wide at any zoom; hairlines exactly that.
+        // Lines are at least one device pixel wide at any zoom; hairlines, or all lines when thin, exactly that.
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
         for (const [layer, byStyle] of paths) {
           if (!layerList[layer].visible) continue;
           for (const { color, width: lineWidth, path } of byStyle.values()) {
             ctx.strokeStyle = css(color, invert);
-            ctx.lineWidth = Math.max(lineWidth, 1 / scale);
+            ctx.lineWidth = this.thinLines ? 1 / scale : Math.max(lineWidth, 1 / scale);
             ctx.stroke(path);
           }
         }

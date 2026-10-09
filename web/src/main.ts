@@ -365,7 +365,8 @@ function showPage(file: OpenFile, page: number): void {
     showLayers(layers);
     syncLayers();
     measure.a = measure.b = measure.hover = null;
-    findButton.hidden = doc.kind !== 'vector';
+    findButton.hidden = thinButton.hidden = doc.kind !== 'vector';
+    if (doc.kind === 'vector') doc.thinLines = thinLines;
     if (findButton.hidden) toggleFind(false);
     pageLabel.textContent = `${page + 1} / ${doc.pageCount}`;
     start.hidden = true;
@@ -491,6 +492,18 @@ document.querySelectorAll('dialog').forEach((dialog) =>
   }),
 );
 const invert = $('invert');
+/** Thin lines stay on across files until turned off. */
+const thinButton = $<HTMLButtonElement>('thin');
+let thinLines = false;
+function toggleThin(): void {
+  thinLines = !thinLines;
+  thinButton.setAttribute('aria-pressed', String(thinLines));
+  if (current?.doc.kind === 'vector') current.doc.thinLines = thinLines;
+  viewer.redraw();
+  minimap.invalidate();
+}
+thinButton.addEventListener('click', toggleThin);
+
 const toggleInvert = () => {
   invert.setAttribute('aria-pressed', String(viewer.toggleInvert()));
   minimap.invalidate();
@@ -518,6 +531,7 @@ const shortcuts: Shortcut[] = [
   { keys: ['0'], label: 'Fit to window', run: () => viewer.fit(), button: 'fit' },
   { keys: ['1'], label: 'Actual pixels', run: () => viewer.actualSize(), when: () => !!current && !actualSize.hidden, button: 'actual' },
   { keys: ['i'], label: 'Swap black and white', run: toggleInvert, button: 'invert' },
+  { keys: ['w'], label: 'Thin lines', run: toggleThin, when: () => !thinButton.hidden, button: 'thin' },
   { keys: ['l'], label: 'Show or hide layers', run: () => toggleLayersPanel(), when: () => !layersButton.hidden, button: 'layers' },
   { keys: ['ArrowLeft', 'PageUp'], label: 'Previous page', run: () => turnPage(-1), button: 'prev-page' },
   { keys: ['ArrowRight', 'PageDown'], label: 'Next page', run: () => turnPage(1), button: 'next-page' },
