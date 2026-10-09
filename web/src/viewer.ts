@@ -1,4 +1,5 @@
 import type { DrawingDocument, View } from './formats/types';
+import { Spring } from './spring';
 
 /** Raster zoom limit, in device pixels per drawing pixel. */
 const MAX_SCALE = 32;
@@ -7,15 +8,36 @@ const MAX_VECTOR_ZOOM = 1000;
 /** Share of the canvas a fitted vector drawing fills, so lines on its edges stay visible. */
 const VECTOR_FIT = 0.95;
 const ZOOM_STEP = 1.5;
+/** Space kept clear for the floating toolbar when fitting, in CSS pixels. */
+const FIT_TOP = 60;
+/** Scroll-like deceleration per millisecond after a flick (Apple's normal rate). */
+const DECELERATION = 0.998;
+/** Flicks slower than this, in CSS pixels per second, just stop. */
+const MIN_FLICK = 60;
+/** Pointer samples older than this are ignored when measuring release velocity. */
+const VELOCITY_WINDOW = 100;
+/** Frames slower than this make view changes jump instead of animate. */
+const SLOW_FRAME_MS = 25;
 
-/** Canvas viewer: mouse wheel zooms around the cursor, left-drag pans, double-click fits. */
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+
+/** Advances an animation by `dt` seconds; returns false once it has finished. */
+type Motion = (dt: number) => boolean;
+
+/** Canvas viewer: mouse wheel zooms around the cursor, left-drag pans (with momentum), double-click fits. */
 export class Viewer {
   private readonly ctx: CanvasRenderingContext2D;
   private doc: DrawingDocument | null = null;
   private view: View = { scale: 1, x: 0, y: 0 };
-  private drag: { x: number; y: number } | null = null;
+  /** Recent pointer positions of the drag in progress, in CSS pixels, newest last. */
+  private drag: { x: number; y: number; t: number }[] | null = null;
   private inverted = false;
   private frame = 0;
+  private motion: Motion | null = null;
+  /** The springs of a running view animation: log scale, then the drawing point at the canvas centre. */
+  private springs: [Spring, Spring, Spring] | null = null;
+  private lastTick = 0;
+  private lastFrameMs = 0;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -28,7 +50,7 @@ export class Viewer {
     canvas.addEventListener('wheel', (e) => this.onWheel(e), { passive: false });
     canvas.addEventListener('pointerdown', (e) => this.onPointerDown(e));
     canvas.addEventListener('pointermove', (e) => this.onPointerMove(e));
-    canvas.addEventListener('pointerup', () => this.endDrag());
+    canvas.addEventListener('pointerup', (e) => this.endDrag(e));
     canvas.addEventListener('pointercancel', () => this.endDrag());
     canvas.addEventListener('dblclick', () => this.fit());
   }
@@ -36,15 +58,14 @@ export class Viewer {
   setDocument(doc: DrawingDocument | null): void {
     this.doc?.free();
     this.doc = doc;
-    this.fit();
+    this.stop();
+    this.syncSize();
+    this.setView(this.fitView());
   }
 
   fit(): void {
     this.syncSize();
-    if (!this.doc) return this.redraw();
-    const scale = this.fitScale();
-    const { width: w, height: h } = this.canvas;
-    this.setView({ scale, x: (this.doc.width - w / scale) / 2, y: (this.doc.height - h / scale) / 2 });
+    if (this.doc) this.animateTo(this.fitView());
   }
 
   /** Swaps black and white. Returns the new state. */
@@ -56,30 +77,109 @@ export class Viewer {
 
   /** One drawing pixel per device pixel, keeping the canvas centre fixed. Raster only. */
   actualSize(): void {
-    this.zoomAt(1 / this.view.scale, this.canvas.width / 2, this.canvas.height / 2);
+    this.zoomAt(1 / this.target().scale, ...this.centre(), true);
   }
 
   zoomIn(): void {
-    this.zoomAt(ZOOM_STEP, this.canvas.width / 2, this.canvas.height / 2);
+    this.zoomAt(ZOOM_STEP, ...this.centre(), true);
   }
 
   zoomOut(): void {
-    this.zoomAt(1 / ZOOM_STEP, this.canvas.width / 2, this.canvas.height / 2);
+    this.zoomAt(1 / ZOOM_STEP, ...this.centre(), true);
   }
 
-  /** Multiplies the scale by `factor`, keeping the drawing point under device pixel (px, py) fixed. */
-  private zoomAt(factor: number, px: number, py: number): void {
+  private centre(): [number, number] {
+    return [this.canvas.width / 2, this.canvas.height / 2];
+  }
+
+  /** The view being shown, or the one an animation in progress is heading for. */
+  private target(): View {
+    return this.springs ? this.fromParams(this.springs.map((s) => s.target)) : this.view;
+  }
+
+  /**
+   * Multiplies the scale by `factor`, keeping the drawing point under device pixel (px, py) fixed.
+   * Button zooms animate and compound on the target, so repeated clicks keep accelerating.
+   */
+  private zoomAt(factor: number, px: number, py: number, animate = false): void {
     if (!this.doc) return;
-    const { scale, x, y } = this.view;
+    const { scale, x, y } = animate ? this.target() : this.view;
     const max = this.doc.kind === 'raster' ? MAX_SCALE : this.fitScale() * MAX_VECTOR_ZOOM;
     const next = Math.min(max, Math.max(this.fitScale() / 4, scale * factor));
-    this.setView({ scale: next, x: x + px / scale - px / next, y: y + py / scale - py / next });
+    const view = { scale: next, x: x + px / scale - px / next, y: y + py / scale - py / next };
+    if (animate) this.animateTo(view);
+    else {
+      this.stop();
+      this.setView(view);
+    }
   }
 
   private fitScale(): number {
     if (!this.doc) return 1;
     const fill = this.doc.kind === 'vector' ? VECTOR_FIT : 1;
-    return fill * Math.min(this.canvas.width / this.doc.width, this.canvas.height / this.doc.height);
+    const top = FIT_TOP * (window.devicePixelRatio || 1);
+    const height = Math.max(1, this.canvas.height - top);
+    return fill * Math.min(this.canvas.width / this.doc.width, height / this.doc.height);
+  }
+
+  /** The whole drawing, centred in the canvas area below the toolbar. */
+  private fitView(): View {
+    if (!this.doc) return this.view;
+    const scale = this.fitScale();
+    const { width: w, height: h } = this.canvas;
+    const top = FIT_TOP * (window.devicePixelRatio || 1);
+    return { scale, x: (this.doc.width - w / scale) / 2, y: this.doc.height / 2 - (h + top) / (2 * scale) };
+  }
+
+  /** Animation parameters of a view: log scale (so zoom feels even), then the drawing point at the canvas centre. */
+  private params({ scale, x, y }: View): [number, number, number] {
+    const [cx, cy] = this.centre();
+    return [Math.log(scale), x + cx / scale, y + cy / scale];
+  }
+
+  private fromParams([logScale, x, y]: number[]): View {
+    const scale = Math.exp(logScale);
+    const [cx, cy] = this.centre();
+    return { scale, x: x - cx / scale, y: y - cy / scale };
+  }
+
+  /**
+   * Springs from the view on screen to `view`. An animation in progress is retargeted, keeping
+   * its velocity. Jumps instead when the user prefers reduced motion or frames are too slow to animate.
+   */
+  animateTo(view: View): void {
+    if (reducedMotion.matches || this.lastFrameMs > SLOW_FRAME_MS) {
+      this.stop();
+      return this.setView(view);
+    }
+    const targets = this.params(view);
+    if (!this.springs) {
+      this.springs = this.params(this.view).map((v) => new Spring(v)) as [Spring, Spring, Spring];
+    }
+    this.springs.forEach((s, i) => (s.target = targets[i]));
+    const springs = this.springs;
+    this.start((dt) => {
+      springs.forEach((s) => s.step(dt));
+      // Settled once off by less than a device pixel at the centre, and by under 0.1% in scale.
+      const pixel = 0.5 / Math.exp(springs[0].target);
+      const done = springs[0].settled(1e-3) && springs[1].settled(pixel) && springs[2].settled(pixel);
+      this.setView(this.fromParams(springs.map((s) => s.value)));
+      if (done) this.springs = null;
+      return !done;
+    });
+  }
+
+  /** Runs `motion` once per frame until it finishes or is stopped. */
+  private start(motion: Motion): void {
+    if (!this.motion) this.lastTick = performance.now();
+    this.motion = motion;
+    this.redraw();
+  }
+
+  /** Stops any animation or momentum where it is: the user has taken over. */
+  private stop(): void {
+    this.motion = null;
+    this.springs = null;
   }
 
   private setView(view: View): void {
@@ -90,17 +190,28 @@ export class Viewer {
 
   redraw(): void {
     if (this.frame) return;
-    this.frame = requestAnimationFrame(() => {
-      this.frame = 0;
-      const { width, height } = this.canvas;
-      if (this.doc?.kind === 'vector') {
-        this.doc.draw(this.ctx, this.view, this.inverted);
-      } else if (this.doc && width > 0 && height > 0) {
-        this.ctx.putImageData(this.doc.render(this.view, width, height, this.inverted), 0, 0);
-      } else {
-        this.ctx.clearRect(0, 0, width, height);
-      }
-    });
+    this.frame = requestAnimationFrame((now) => this.paint(now));
+  }
+
+  private paint(now: number): void {
+    // `frame` stays set until the drawing is done, so view changes made here don't queue another frame.
+    if (this.motion) {
+      const dt = Math.min(0.05, Math.max(0, (now - this.lastTick) / 1000));
+      this.lastTick = now;
+      if (!this.motion(dt)) this.motion = null;
+    }
+    const started = performance.now();
+    const { width, height } = this.canvas;
+    if (this.doc?.kind === 'vector') {
+      this.doc.draw(this.ctx, this.view, this.inverted);
+    } else if (this.doc && width > 0 && height > 0) {
+      this.ctx.putImageData(this.doc.render(this.view, width, height, this.inverted), 0, 0);
+    } else {
+      this.ctx.clearRect(0, 0, width, height);
+    }
+    this.lastFrameMs = performance.now() - started;
+    this.frame = 0;
+    if (this.motion) this.redraw();
   }
 
   /** Matches the canvas' backing store to its CSS size in device pixels. Returns true if it changed. */
@@ -130,23 +241,46 @@ export class Viewer {
 
   private onPointerDown(e: PointerEvent): void {
     if (e.button !== 0 || !this.doc) return;
+    // Grabbing the drawing catches it mid-flight.
+    this.stop();
     this.canvas.setPointerCapture(e.pointerId);
     this.canvas.classList.add('dragging');
-    this.drag = { x: e.clientX, y: e.clientY };
+    this.drag = [{ x: e.clientX, y: e.clientY, t: e.timeStamp }];
   }
 
   private onPointerMove(e: PointerEvent): void {
     if (!this.drag) return;
     const dpr = window.devicePixelRatio || 1;
     const { scale, x, y } = this.view;
-    const dx = ((e.clientX - this.drag.x) * dpr) / scale;
-    const dy = ((e.clientY - this.drag.y) * dpr) / scale;
-    this.drag = { x: e.clientX, y: e.clientY };
+    const last = this.drag[this.drag.length - 1];
+    const dx = ((e.clientX - last.x) * dpr) / scale;
+    const dy = ((e.clientY - last.y) * dpr) / scale;
+    this.drag.push({ x: e.clientX, y: e.clientY, t: e.timeStamp });
+    this.drag = this.drag.filter((p) => e.timeStamp - p.t <= VELOCITY_WINDOW);
     this.setView({ scale, x: x - dx, y: y - dy });
   }
 
-  private endDrag(): void {
+  /** On release, the drawing keeps the finger's velocity and decelerates like a scroll view. */
+  private endDrag(e?: PointerEvent): void {
+    const samples = this.drag?.filter((p) => !e || e.timeStamp - p.t <= VELOCITY_WINDOW);
     this.drag = null;
     this.canvas.classList.remove('dragging');
+    if (!e || !samples || samples.length < 2 || reducedMotion.matches) return;
+    const first = samples[0];
+    const last = samples[samples.length - 1];
+    const seconds = (last.t - first.t) / 1000;
+    if (seconds <= 0) return;
+    let vx = (last.x - first.x) / seconds;
+    let vy = (last.y - first.y) / seconds;
+    if (Math.hypot(vx, vy) < MIN_FLICK) return;
+    this.start((dt) => {
+      const dpr = window.devicePixelRatio || 1;
+      const { scale, x, y } = this.view;
+      this.setView({ scale, x: x - (vx * dt * dpr) / scale, y: y - (vy * dt * dpr) / scale });
+      const decay = DECELERATION ** (dt * 1000);
+      vx *= decay;
+      vy *= decay;
+      return Math.hypot(vx, vy) >= MIN_FLICK / 4;
+    });
   }
 }
