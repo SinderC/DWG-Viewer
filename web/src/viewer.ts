@@ -126,11 +126,7 @@ export class Viewer {
     const max = this.doc.kind === 'raster' ? MAX_SCALE : this.fitScale() * MAX_VECTOR_ZOOM;
     const next = Math.min(max, Math.max(this.fitScale() / 4, scale * factor));
     const view = { scale: next, x: x + px / scale - px / next, y: y + py / scale - py / next };
-    if (animate) this.animateTo(view);
-    else {
-      this.stop();
-      this.setView(view);
-    }
+    this.go(view, animate);
   }
 
   private fitScale(): number {
@@ -148,6 +144,13 @@ export class Viewer {
     const { width: w, height: h } = this.canvas;
     const top = FIT_TOP * (window.devicePixelRatio || 1);
     return { scale, x: (this.doc.width - w / scale) / 2, y: this.doc.height / 2 - (h + top) / (2 * scale) };
+  }
+
+  /** Shows `view`, springing to it or jumping there (which stops any animation in progress). */
+  private go(view: View, animate: boolean): void {
+    if (animate) return this.animateTo(view);
+    this.stop();
+    this.setView(view);
   }
 
   /** Animation parameters of a view: log scale (so zoom feels even), then the drawing point at the canvas centre. */
@@ -216,6 +219,32 @@ export class Viewer {
   redrawOverlay(): void {
     if (this.frame) return;
     this.frame = requestAnimationFrame((now) => this.paint(now));
+  }
+
+  get document(): DrawingDocument | null {
+    return this.doc;
+  }
+
+  get isInverted(): boolean {
+    return this.inverted;
+  }
+
+  /** Canvas size in device pixels. */
+  get size(): [number, number] {
+    return [this.canvas.width, this.canvas.height];
+  }
+
+  /** Current scale relative to the fitted one. */
+  fitRatio(): number {
+    return this.view.scale / this.fitScale();
+  }
+
+  /** Moves the drawing point (x, y) to the centre of the canvas, keeping the scale. */
+  centreOn(x: number, y: number, animate: boolean): void {
+    const { scale } = animate ? this.target() : this.view;
+    const [cx, cy] = this.centre();
+    const view = { scale, x: x - cx / scale, y: y - cy / scale };
+    this.go(view, animate);
   }
 
   /** The view on screen; `x`, `y` and `scale` map drawing units to device pixels. */

@@ -4,6 +4,7 @@ import { dwg, dxf } from './formats/dxf';
 import { hpgl } from './formats/hpgl';
 import { tiff } from './formats/tiff';
 import type { DrawingDocument, FormatPlugin, Layer, View } from './formats/types';
+import { Minimap } from './minimap';
 import { Viewer } from './viewer';
 
 // HP-GL has no signature, so its loose sniff goes last.
@@ -111,7 +112,10 @@ function setMeasuring(on: boolean): void {
 
 const viewer = new Viewer(canvas, $<HTMLCanvasElement>('overlay'), paintOverlay, (view) => {
   zoomLabel.textContent = `${Math.round(view.scale * 100)}%`;
+  minimap.update();
 });
+const minimapEl = $('minimap');
+const minimap = new Minimap(minimapEl, minimapEl.querySelector('canvas')!, viewer);
 
 function findPlugin(name: string, bytes: Uint8Array): FormatPlugin | undefined {
   const ext = name.split('.').pop()?.toLowerCase() ?? '';
@@ -246,6 +250,7 @@ function syncLayers(): void {
   const on = layerRows.filter((r) => r.layer.visible).length;
   layerCount.textContent = `${on} of ${layerRows.length} shown`;
   viewer.redraw();
+  minimap.invalidate();
 }
 
 function filterLayers(): void {
@@ -289,6 +294,7 @@ function showPage(file: OpenFile, page: number): void {
     start.hidden = true;
     document.body.classList.add('has-doc');
     viewer.setDocument(doc);
+    minimap.invalidate();
   } catch (err) {
     showError(file.name, err);
   }
@@ -407,7 +413,10 @@ document.querySelectorAll('dialog').forEach((dialog) =>
   }),
 );
 const invert = $('invert');
-const toggleInvert = () => invert.setAttribute('aria-pressed', String(viewer.toggleInvert()));
+const toggleInvert = () => {
+  invert.setAttribute('aria-pressed', String(viewer.toggleInvert()));
+  minimap.invalidate();
+};
 invert.addEventListener('click', toggleInvert);
 
 const mac = /Mac|iPhone|iPad/.test(navigator.userAgent);

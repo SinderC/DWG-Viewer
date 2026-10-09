@@ -237,6 +237,23 @@
       #coords b { margin-right: 4px; color: var(--fg); font-weight: 600; }
       #coords b:not(:first-child) { margin-left: 10px; }
 
+      /* Overview: grows out of the bottom-right corner once zoomed in; steps aside for the layers card. */
+      #minimap {
+        position: fixed;
+        right: 12px;
+        bottom: 12px;
+        padding: 6px;
+        border-radius: 12px;
+        transform: scale(0.9);
+        transform-origin: bottom right;
+        opacity: 0;
+        visibility: hidden;
+        transition: transform 300ms var(--ease-out), opacity 200ms ease-out, right 380ms var(--ease-out), visibility 0s 300ms;
+      }
+      #minimap.show { transform: none; opacity: 1; visibility: visible; transition: transform 300ms var(--ease-out), opacity 200ms ease-out, right 380ms var(--ease-out); }
+      #layers-panel.open ~ #minimap { right: 288px; }
+      #minimap canvas { position: static; display: block; border-radius: 6px; cursor: pointer; }
+
       /* Toast for progress and errors. */
       #toast {
         position: fixed;
@@ -378,6 +395,7 @@
       <div id="layer-list"></div>
     </aside>
 
+    <div id="minimap" class="glass"><canvas aria-label="Overview: click to move there"></canvas></div>
     <div id="coords" class="glass" hidden></div>
     <div id="toast" class="glass" role="status" aria-live="polite"></div>
 
