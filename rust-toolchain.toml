@@ -1,0 +1,5 @@
+# Pinned so local and CI builds produce the same WASM. Bump deliberately, and check the size of dist/index.html.
+[toolchain]
+channel = "1.99.1"
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"

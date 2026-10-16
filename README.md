@@ -42,11 +42,11 @@ To use it offline, save the page (File → Save Page As) — it is a single self
 
 ## Build
 
-Requires Rust via rustup (the `wasm32-unknown-unknown` target), `wasm-bindgen-cli` matching the
-`wasm-bindgen` crate version, and Node.js.
+Requires Rust via rustup (`rust-toolchain.toml` pins the version and the `wasm32-unknown-unknown`
+target; rustup installs them on first build), `wasm-bindgen-cli` matching the `wasm-bindgen` crate
+version, and Node.js.
 
 ```sh
-rustup target add wasm32-unknown-unknown
 cargo install wasm-bindgen-cli --version 0.2.128 --locked
 npm install
 npm run build        # -> dist/index.html (single self-contained file)
