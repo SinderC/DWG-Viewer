@@ -3,6 +3,8 @@ members = ["crates/raster"]
 resolver = "2"
 
 [profile.release]
+# Function names are only for stack traces; they were a third of the page.
+strip = true
 opt-level = 3
 lto = true
 codegen-units = 1

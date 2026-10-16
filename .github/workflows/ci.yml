@@ -22,9 +22,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
+      # Installs the toolchain and wasm target pinned in rust-toolchain.toml.
+      - run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
 
