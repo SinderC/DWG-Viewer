@@ -27,7 +27,8 @@ the built page's Content-Security-Policy blocks all network access. Supported fo
   Tested only on synthetic files.
 - **CGM** (binary and clear-text encodings, including WebCGM): one page per picture; polylines, polygons and polygon
   sets, rectangles, circles, ellipses and their arcs (open, pie and chord), Béziers, markers, text
-  (all four text paths; restricted text shrunk to its box), colour tables and direct colour (RGB, CMYK),
+  (all four text paths; restricted text shrunk to its box; fonts as sans-serif, serif or monospace,
+  italic and bold by name), colour tables and direct colour (RGB, CMYK),
   line and edge widths and types, solid and hatch fills, cell arrays (rotated or skewed too),
   Group 4/JPEG/PNG tiles and WebCGM layers. Not drawn: pattern fills (drawn solid), NURBS and conics,
   clipping, character spacing on horizontal text. Nominal marker size, hatch spacing and dash lengths

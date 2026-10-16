@@ -294,6 +294,12 @@ impl DxfDoc {
         self.drawing.texts.iter().map(|t| t.fit).collect()
     }
 
+    /// Font of each text: family (0 sans-serif, 1 serif, 2 monospace) plus 4 for italic and 8 for bold.
+    #[wasm_bindgen(js_name = textFonts)]
+    pub fn text_fonts(&self) -> Vec<u8> {
+        self.drawing.texts.iter().map(|t| t.font).collect()
+    }
+
     #[wasm_bindgen(js_name = textColors)]
     pub fn text_colors(&self) -> Vec<u32> {
         self.drawing.texts.iter().map(|t| t.color).collect()
