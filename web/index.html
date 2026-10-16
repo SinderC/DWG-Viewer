@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Drawing Viewer</title>
+    <title>Open Drawing Viewer</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2032%2032'%3E%3Cstyle%3Eg{stroke:%230071e3}@media(prefers-color-scheme:dark){g{stroke:%230a84ff}}%3C/style%3E%3Cg%20fill='none'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Cpath%20d='M2%206h22l6%206v14H2z'%20stroke-width='2'/%3E%3Cpath%20d='M24%206v6h6'%20stroke-width='1.6'/%3E%3Ccircle%20cx='16'%20cy='15'%20r='4'%20stroke-width='1.8'/%3E%3Cpath%20d='M16%209.5v11M10.5%2015h11'/%3E%3Cpath%20d='M12%2022.5h8M12%2021v3M20%2021v3'%20stroke-width='1.2'/%3E%3C/g%3E%3C/svg%3E" />
     <style>
       :root {
@@ -58,6 +58,7 @@
       /* Visible overflow: at fractional positions the box would clip the shapes' anti-aliased edges. */
       svg.icon { width: 20px; height: 20px; fill: currentColor; overflow: visible; }
       :is(#toolbar, #find-bar) svg.icon { width: 16px; height: 16px; }
+      #toolbar svg.icon { width: 21px; height: 21px; }
 
       /* Floating translucent material for all chrome. */
       .glass {
@@ -123,14 +124,17 @@
         display: flex;
         align-items: center;
         max-width: calc(100vw - 24px);
-        padding: 4px;
+        padding: 5px;
         border-radius: 999px;
+        font-size: 16px;
         overflow-x: auto;
         scrollbar-width: none;
         z-index: 2;
       }
-      .group { display: flex; flex: none; align-items: center; gap: 2px; }
-      .group + .group { margin-left: 6px; padding-left: 6px; border-left: 1px solid var(--separator); }
+      #toolbar button { min-width: 42px; height: 42px; }
+      #toolbar .text-button { padding: 0 13px; }
+      .group { display: flex; flex: none; align-items: center; gap: 3px; }
+      .group + .group { margin-left: 8px; padding-left: 8px; border-left: 1px solid var(--separator); }
       #title {
         max-width: 28ch;
         padding: 0 8px 0 4px;
@@ -147,8 +151,8 @@
       }
       #title:empty { display: none; }
       body:not(.has-doc) .doc, body:not(.has-doc) #toolbar { display: none; }
-      #zoom, #page { min-width: 48px; color: var(--muted); font-variant-numeric: tabular-nums; text-align: center; }
-      #actual { font-weight: 600; font-size: 12px; }
+      #zoom, #page { min-width: 62px; color: var(--muted); font-variant-numeric: tabular-nums; text-align: center; }
+      #actual { font-weight: 600; font-size: 15px; }
       @media (max-width: 640px) {
         #title { display: none; }
         #toolbar { left: 12px; transform: none; }
@@ -157,7 +161,7 @@
       /* Find bar: rises above the toolbar it came from. */
       #find-bar {
         position: fixed;
-        bottom: 60px;
+        bottom: 72px;
         left: 50%;
         display: flex;
         align-items: center;
@@ -174,14 +178,14 @@
       }
       #find-bar.open { transform: translate(-50%, 0); opacity: 1; visibility: visible; transition: transform 300ms var(--ease-out), opacity 200ms ease-out; }
       #find-bar input { flex: 1; min-width: 0; }
-      #find-count { min-width: 56px; color: var(--muted); font-variant-numeric: tabular-nums; text-align: center; }
+      #find-count { min-width: 56px; padding: 0 8px 0 12px; color: var(--muted); font-variant-numeric: tabular-nums; text-align: center; }
 
       /* Layers: an inset card that slides in from, and back out to, the right edge. */
       #layers-panel {
         position: fixed;
         top: 12px;
         right: 12px;
-        max-height: calc(100% - 76px);
+        max-height: calc(100% - 88px);
         display: flex;
         flex-direction: column;
         gap: 8px;
@@ -243,7 +247,7 @@
       }
       body.drop .card { transform: scale(1.02); box-shadow: inset 0 1px 0 var(--glass-edge), 0 0 0 3px var(--accent), var(--shadow); }
       body.drop #start ~ main::after { display: none; }
-      .card .glyph { width: 56px; height: 56px; color: var(--accent); stroke-width: 1.2; }
+      .card .glyph { width: 80px; height: 80px; color: var(--accent); stroke-width: 1.2; }
       .card h1 { margin: 12px 0 6px; font-size: 28px; font-weight: 700; line-height: 1.1; letter-spacing: -0.02em; }
       .card p { margin: 0; color: var(--muted); font-size: 14px; }
       .card .primary { margin: 20px 0 24px; }
@@ -418,7 +422,7 @@
       <symbol id="i-keys" viewBox="0 0 576 512"><path d="M64 64C28.7 64 0 92.7 0 128L0 384c0 35.3 28.7 64 64 64l448 0c35.3 0 64-28.7 64-64l0-256c0-35.3-28.7-64-64-64L64 64zm16 64l32 0c8.8 0 16 7.2 16 16l0 32c0 8.8-7.2 16-16 16l-32 0c-8.8 0-16-7.2-16-16l0-32c0-8.8 7.2-16 16-16zM64 240c0-8.8 7.2-16 16-16l32 0c8.8 0 16 7.2 16 16l0 32c0 8.8-7.2 16-16 16l-32 0c-8.8 0-16-7.2-16-16l0-32zM176 128l32 0c8.8 0 16 7.2 16 16l0 32c0 8.8-7.2 16-16 16l-32 0c-8.8 0-16-7.2-16-16l0-32c0-8.8 7.2-16 16-16zM160 240c0-8.8 7.2-16 16-16l32 0c8.8 0 16 7.2 16 16l0 32c0 8.8-7.2 16-16 16l-32 0c-8.8 0-16-7.2-16-16l0-32zm16 80l224 0c8.8 0 16 7.2 16 16l0 32c0 8.8-7.2 16-16 16l-224 0c-8.8 0-16-7.2-16-16l0-32c0-8.8 7.2-16 16-16zm80-176c0-8.8 7.2-16 16-16l32 0c8.8 0 16 7.2 16 16l0 32c0 8.8-7.2 16-16 16l-32 0c-8.8 0-16-7.2-16-16l0-32zm16 80l32 0c8.8 0 16 7.2 16 16l0 32c0 8.8-7.2 16-16 16l-32 0c-8.8 0-16-7.2-16-16l0-32c0-8.8 7.2-16 16-16zm80-80c0-8.8 7.2-16 16-16l32 0c8.8 0 16 7.2 16 16l0 32c0 8.8-7.2 16-16 16l-32 0c-8.8 0-16-7.2-16-16l0-32zm16 80l32 0c8.8 0 16 7.2 16 16l0 32c0 8.8-7.2 16-16 16l-32 0c-8.8 0-16-7.2-16-16l0-32c0-8.8 7.2-16 16-16zm80-80c0-8.8 7.2-16 16-16l32 0c8.8 0 16 7.2 16 16l0 32c0 8.8-7.2 16-16 16l-32 0c-8.8 0-16-7.2-16-16l0-32zm16 80l32 0c8.8 0 16 7.2 16 16l0 32c0 8.8-7.2 16-16 16l-32 0c-8.8 0-16-7.2-16-16l0-32c0-8.8 7.2-16 16-16z" /></symbol>
       <symbol id="i-prev" viewBox="0 0 320 512"><path d="M9.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l192 192c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L77.3 256 246.6 86.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-192 192z" /></symbol>
       <symbol id="i-next" viewBox="0 0 320 512"><path d="M311.1 233.4c12.5 12.5 12.5 32.8 0 45.3l-192 192c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L243.2 256 73.9 86.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l192 192z" /></symbol>
-      <symbol id="i-drawing" viewBox="0 0 48 48"><g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M10 5h20l10 10v28H10z" /><path d="M30 5v10h10M16 36l8-14 8 14zM16 27h6" /></g></symbol>
+      <symbol id="i-drawing" viewBox="0 0 48 48"><g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10h32l8 8v20H4z" /><path d="M36 10v8h8M11 26l7-11 7 11zM11 31h14M11 29v4M25 29v4M30 38v-8h14M30 34h14M37 34v4" /></g></symbol>
     </svg>
     <input id="file" type="file" hidden />
 
@@ -430,7 +434,7 @@
     <div id="start">
       <div class="card glass">
         <svg class="icon glyph" aria-hidden="true"><use href="#i-drawing" /></svg>
-        <h1>Drawing Viewer</h1>
+        <h1>Open Drawing Viewer</h1>
         <p>Open an engineering drawing, or drop it anywhere on this page.</p>
         <button class="primary" id="start-open">Open Drawing…</button>
         <ul id="formats" aria-label="Supported formats"></ul>

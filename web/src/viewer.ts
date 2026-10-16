@@ -9,7 +9,7 @@ const MAX_VECTOR_ZOOM = 1000;
 const VECTOR_FIT = 0.95;
 const ZOOM_STEP = 1.5;
 /** Space kept clear for the floating toolbar when fitting, in CSS pixels. */
-const FIT_BOTTOM = 60;
+const FIT_BOTTOM = 72;
 /** Scroll-like deceleration per millisecond after a flick (Apple's normal rate). */
 const DECELERATION = 0.998;
 /** Flicks slower than this, in CSS pixels per second, just stop. */

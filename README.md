@@ -1,4 +1,4 @@
-# Drawing Viewer
+# Open Drawing Viewer
 
 Offline drawing viewer that runs entirely in the browser. Files are read locally and never uploaded;
 the built page's Content-Security-Policy blocks all network access. Supported formats:
