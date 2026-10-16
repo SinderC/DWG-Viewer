@@ -11,7 +11,7 @@ mod text;
 use std::f64::consts::TAU;
 
 use crate::dwf::image::{self as raster_image, Kind};
-use crate::dxf::{self, Affine, Arc, Pen, World, BACKGROUND, FOREGROUND, P};
+use crate::dxf::{self, Affine, Arc, Pen, TextStyle, World, BACKGROUND, FONT_BOLD, FONT_ITALIC, FONT_MONO, FONT_SANS, FONT_SERIF, FOREGROUND, P};
 use crate::bitmap::Bitmap;
 use crate::rgba::{rgb, RgbaImage, MAX_PIXELS};
 use crate::tiff::Image;
@@ -137,6 +137,8 @@ struct State {
     hatch: i64,
     fill_color: Colour,
     text_color: Colour,
+    /// TEXT FONT INDEX into the font list, from 1.
+    font: i64,
     char_height: Option<f64>,
     char_up: P,
     char_base: P,
@@ -179,6 +181,7 @@ impl Default for State {
             hatch: 1,
             fill_color: black,
             text_color: black,
+            font: 1,
             char_height: None,
             char_up: [0.0, 1.0],
             char_base: [1.0, 0.0],
@@ -285,6 +288,8 @@ struct Decoder {
     warning: Option<String>,
     /// Millimetres per VDC unit of the requested picture, if metric.
     metric: Option<f64>,
+    /// FONT LIST.
+    fonts: Vec<String>,
     aps: Vec<Aps>,
     default_layer: Option<u32>,
     /// Text waiting for APPEND TEXT: position, characters so far and the box of restricted text.
@@ -304,6 +309,7 @@ impl Decoder {
             info: Vec::new(),
             warning: None,
             metric: None,
+            fonts: Vec::new(),
             aps: Vec::new(),
             default_layer: None,
             text: None,
@@ -424,6 +430,7 @@ impl Decoder {
                     fonts.push(r.string()?);
                 }
                 self.info.push(("Fonts".into(), fonts.join(", ")));
+                self.fonts = fonts;
             }
             19 => {
                 p.components = match r.index()? {
@@ -476,6 +483,7 @@ impl Decoder {
             3 => st.line_width = Some(width(r, st.line_mode)?),
             4 => st.line_color = st.color(r)?,
             6 => st.marker_type = r.index()?,
+            10 => st.font = r.index()?,
             7 => st.marker_size = Some(width(r, st.marker_mode)?),
             8 => st.marker_color = st.color(r)?,
             12 => st.expansion = r.real()?,
@@ -713,9 +721,10 @@ impl Decoder {
         let reversed = st.path == 1 || st.path == 2;
         let chars: Vec<char> = if reversed { text.chars().rev().collect() } else { text.chars().collect() };
         let pitch = height * (VERTICAL_PITCH + st.spacing);
+        let font = self.fonts.get((st.font - 1).max(0) as usize).map_or(FONT_SANS, |name| font_style(name));
         let pen = self.pen(self.st.text_color, 0.0);
         if !vertical {
-            return self.world.text_frame(pos, x, upv, (h, v), chars.into_iter().collect(), fit, &m, pen);
+            return self.world.text_frame(pos, x, upv, (h, v), chars.into_iter().collect(), TextStyle { fit, font }, &m, pen);
         }
         // Distance from the anchor up to the top of the column, which runs from the first
         // character's top to the last one's baseline.
@@ -727,7 +736,7 @@ impl Decoder {
         };
         for (i, c) in chars.into_iter().enumerate() {
             let at = top - i as f64 * pitch;
-            self.world.text_frame([pos[0] + up[0] * at, pos[1] + up[1] * at], x, upv, (h, 3), c.to_string(), 0.0, &m, pen);
+            self.world.text_frame([pos[0] + up[0] * at, pos[1] + up[1] * at], x, upv, (h, 3), c.to_string(), TextStyle { fit: 0.0, font }, &m, pen);
         }
     }
 
@@ -1007,6 +1016,25 @@ fn scale_factor(r: &mut Params) -> R<f64> {
     }
     let precision = Precision::default();
     read::params(bytes, &precision).real_as(Real::Fixed32)
+}
+
+/// The browser font family and style closest to a font list name, such as "Helvetica-BoldOblique",
+/// "Times Roman" or "HERSHEY:SIMPLEX_ROMAN" (Hershey's simplex stroke fonts have no serifs).
+fn font_style(name: &str) -> u8 {
+    let name = name.to_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| name.contains(w));
+    let family = if has(&["sans", "simplex"]) {
+        FONT_SANS
+    } else if has(&["courier", "mono", "typewriter", "fixed", "lineprinter"]) {
+        FONT_MONO
+    } else if has(&["times", "roman", "serif", "century", "schoolbook", "garamond", "bookman", "palatino", "georgia"]) {
+        FONT_SERIF
+    } else {
+        FONT_SANS
+    };
+    let italic = if has(&["italic", "oblique", "slant"]) { FONT_ITALIC } else { 0 };
+    let bold = if has(&["bold", "heavy", "black", "demi"]) { FONT_BOLD } else { 0 };
+    family | italic | bold
 }
 
 /// Angle of an axis-aligned vector (counter-clockwise, Y up) in degrees.
@@ -1357,6 +1385,18 @@ mod tests {
         let d = decode1(&[cmd(4, 26, &ints(&[2, 0, 0, 1, 1, 2, 1, 3, 0]))]);
         assert_eq!(d.paths[0].points.len(), BEZIER_STEPS + 1);
         assert_eq!(d.paths[0].points.last(), Some(&[3.0, d.height]));
+    }
+
+    #[test]
+    fn fonts() {
+        let names = ["Helvetica", "HelveticaOblique", "Times-BoldItalic", "Courier", "HERSHEY:SIMPLEX_ROMAN", "HERSHEY:COMPLEX_ROMAN", "NOT_USED"];
+        let styles: Vec<u8> = names.iter().map(|n| font_style(n)).collect();
+        assert_eq!(styles, [FONT_SANS, FONT_ITALIC, FONT_SERIF | FONT_ITALIC | FONT_BOLD, FONT_MONO, FONT_SANS, FONT_SERIF, FONT_SANS]);
+        // TEXT FONT INDEX picks from the font list, counting from 1.
+        let fonts = cmd(1, 13, &[&s("Helvetica")[..], &s("Courier")].concat());
+        let text = cmd(4, 4, &[&ints(&[0, 0, 1])[..], &s("A")].concat());
+        let d = decode(&file(&[fonts], &[&[text.clone(), cmd(5, 10, &ints(&[2])), text]]), 0).unwrap().0;
+        assert_eq!((d.texts[0].font, d.texts[1].font), (FONT_SANS, FONT_MONO));
     }
 
     #[test]

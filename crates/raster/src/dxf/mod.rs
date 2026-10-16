@@ -66,6 +66,22 @@ pub struct Text {
     pub layer: u32,
     /// Width the text is shrunk to fit if wider, in drawing units; 0 for none.
     pub fit: f64,
+    /// Font family and style: `FONT_SANS`, `FONT_SERIF` or `FONT_MONO`, plus `FONT_ITALIC` and `FONT_BOLD`.
+    pub font: u8,
+}
+
+pub const FONT_SANS: u8 = 0;
+pub const FONT_SERIF: u8 = 1;
+pub const FONT_MONO: u8 = 2;
+pub const FONT_ITALIC: u8 = 4;
+pub const FONT_BOLD: u8 = 8;
+
+/// How a text is set beyond its frame: the width it must fit in (0 for none, in the frame's
+/// units) and its font (see `Text::font`).
+#[derive(Clone, Copy, Default)]
+pub(crate) struct TextStyle {
+    pub fit: f64,
+    pub font: u8,
 }
 
 /// A filled area: the rings are subpaths of one shape, filled with the even-odd or non-zero rule.
@@ -320,18 +336,19 @@ impl<'a> World<'a> {
             return;
         }
         let (s, c) = rotation.sin_cos();
-        self.text_frame(pos, [c * height * width, s * height * width], [-s * height, c * height], (halign, valign), text, 0.0, m, pen);
+        self.text_frame(pos, [c * height * width, s * height * width], [-s * height, c * height], (halign, valign), text, TextStyle::default(), m, pen);
     }
 
     /// Text in glyph space spanned by `x` and `up` (see [`Text`]), which need not be perpendicular.
     #[allow(clippy::too_many_arguments)]
-    /// `fit` is the width, along `x`, the text must fit in (0 for none).
+    /// `style.fit` is the width, along `x`, the text must fit in (0 for none).
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn text_frame(&mut self, pos: P, x: P, up: P, (halign, valign): (u8, u8), text: String, fit: f64, m: &Affine, pen: Pen) {
+    pub(crate) fn text_frame(&mut self, pos: P, x: P, up: P, (halign, valign): (u8, u8), text: String, style: TextStyle, m: &Affine, pen: Pen) {
         if !text.trim().is_empty() {
             let len = |v: P| v[0].hypot(v[1]);
-            let fit = if len(x) > 0.0 { fit * len(m.linear(x)) / len(x) } else { 0.0 };
-            self.texts.push(Text { pos: m.apply(pos), x: m.linear(x), up: m.linear(up), halign, valign, text, color: pen.color, layer: pen.layer, fit });
+            let fit = if len(x) > 0.0 { style.fit * len(m.linear(x)) / len(x) } else { 0.0 };
+            let text = Text { pos: m.apply(pos), x: m.linear(x), up: m.linear(up), halign, valign, text, color: pen.color, layer: pen.layer, fit, font: style.font };
+            self.texts.push(text);
         }
     }
 

@@ -175,6 +175,7 @@ const ELEMENTS: &[Element] = &[
     ("MARKERTYPE", 5, 6, &[Int], 0),
     ("MARKERSIZE", 5, 7, &[Real], 0),
     ("MARKERCOLR", 5, 8, &[Colour], 0),
+    ("TEXTFONTINDEX", 5, 10, &[Int], 0),
     ("CHAREXPAN", 5, 12, &[Real], 0),
     ("CHARSPACE", 5, 13, &[Real], 0),
     ("TEXTCOLR", 5, 14, &[Colour], 0),

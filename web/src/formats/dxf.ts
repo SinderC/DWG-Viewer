@@ -17,6 +17,8 @@ const MIN_TEXT_PX = 1.5;
 const MAX_LUMA_ON_WHITE = 170;
 const MIN_LUMA_ON_BLACK = 70;
 const ALIGN: CanvasTextAlign[] = ['left', 'center', 'right'];
+/** Font families by the low two bits of a text's font code; 4 adds italic, 8 bold. */
+const FAMILY = ['sans-serif', 'serif', 'monospace'];
 const BASELINE: CanvasTextBaseline[] = ['alphabetic', 'bottom', 'middle', 'top'];
 
 interface Text {
@@ -30,6 +32,9 @@ interface Text {
   reach: number;
   align: CanvasTextAlign;
   baseline: CanvasTextBaseline;
+  /** CSS font style and weight (with a trailing space, or empty), and family. */
+  style: string;
+  family: string;
   /** Lines are shifted up by this many line pitches so the block sits on its anchor. */
   shift: number;
   lines: string[];
@@ -177,9 +182,11 @@ function texts(doc: DxfDoc): Text[] {
   const colors = doc.textColors();
   const layers = doc.textLayers();
   const fits = doc.textFits();
+  const fonts = doc.textFonts();
   const measure = document.createElement('canvas').getContext('2d')!;
-  measure.font = `${100 * EM_PER_CAP}px sans-serif`;
   return doc.textStrings().map((string, i) => {
+    const style = (fonts[i] & 4 ? 'italic ' : '') + (fonts[i] & 8 ? 'bold ' : '');
+    const family = FAMILY[fonts[i] & 3] ?? FAMILY[0];
     const [x, y, ax, ay, ux, uy, halign, valign] = data.subarray(8 * i, 8 * i + 8);
     const lines = string.split('\n');
     const longest = Math.max(...lines.map((l) => l.length));
@@ -187,6 +194,7 @@ function texts(doc: DxfDoc): Text[] {
     const cap = Math.hypot(ux, uy);
     let height = cap;
     if (fits[i] > 0) {
+      measure.font = `${style}${100 * EM_PER_CAP}px ${family}`;
       const wide = Math.max(...lines.map((l) => measure.measureText(l).width)) / 100;
       height *= Math.min(1, fits[i] / (wide * Math.hypot(ax, ay)));
     }
@@ -199,6 +207,8 @@ function texts(doc: DxfDoc): Text[] {
       reach: (Math.hypot(ax, ay) * longest + height * lines.length * LINE_SPACING) * EM_PER_CAP,
       align: ALIGN[halign],
       baseline: BASELINE[valign],
+      style,
+      family,
       shift: valign === 3 ? 0 : valign === 2 ? (lines.length - 1) / 2 : lines.length - 1,
       lines,
       color: colors[i],
@@ -297,7 +307,7 @@ export function vectorDocument(doc: DxfDoc): VectorDocument {
           const reach = t.reach * scale;
           if (!layerList[t.layer].visible || px < MIN_TEXT_PX || sx < -reach || sy < -reach || sx > width + reach || sy > height + reach) continue;
           ctx.setTransform(...t.matrix, sx, sy);
-          ctx.font = `${px * EM_PER_CAP}px sans-serif`;
+          ctx.font = `${t.style}${px * EM_PER_CAP}px ${t.family}`;
           ctx.textAlign = t.align;
           ctx.textBaseline = t.baseline;
           ctx.fillStyle = css(t.color, invert);
