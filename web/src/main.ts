@@ -15,6 +15,7 @@ const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as 
 const fileInput = $<HTMLInputElement>('file');
 const title = $('title');
 const toastEl = $('toast');
+const toastText = toastEl.querySelector('span')!;
 const zoomLabel = $('zoom');
 const start = $('start');
 const pager = $('pager');
@@ -269,7 +270,7 @@ let toastTimer = 0;
 /** Shows `message` in the toast; it hides itself after `ms` unless `ms` is 0. */
 function toast(message: string, { error = false, ms = 4000 } = {}): void {
   clearTimeout(toastTimer);
-  toastEl.textContent = message;
+  toastText.textContent = message;
   toastEl.classList.toggle('error', error);
   toastEl.classList.add('show');
   if (ms) toastTimer = setTimeout(hideToast, ms);

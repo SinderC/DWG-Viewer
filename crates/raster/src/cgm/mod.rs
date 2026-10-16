@@ -1,15 +1,18 @@
-//! CGM (ISO 8632) metafiles in the binary encoding, drawn through the DXF output helpers.
+//! CGM (ISO 8632) metafiles in the binary encoding, drawn through the DXF output helpers. The
+//! clear-text encoding is transcoded to binary first.
 //!
 //! Each picture is a page. Virtual device coordinates (VDC) map to world coordinates by the
 //! direction of the VDC extent (its first corner is the bottom-left of the picture) and, in metric
 //! scaling mode, the millimetres per VDC unit. Filled areas are drawn under all lines.
 
 mod read;
+mod text;
 
 use std::f64::consts::TAU;
 
 use crate::dwf::image::{self as raster_image, Kind};
 use crate::dxf::{self, Affine, Arc, Pen, World, BACKGROUND, FOREGROUND, P};
+use crate::bitmap::Bitmap;
 use crate::rgba::{rgb, RgbaImage, MAX_PIXELS};
 use crate::tiff::Image;
 use read::{Bits, Command, Params, Precision, Real, R};
@@ -20,17 +23,26 @@ const BEZIER_STEPS: usize = 32;
 /// Scaled line widths are multiples of this fraction of the VDC extent's longer side. The standard
 /// leaves the nominal width to the device; a scale of 1 or less is drawn as a hairline.
 const NOMINAL_WIDTH: f64 = 1.0 / 1000.0;
+/// The same for marker sizes, hatch line spacing and the unit of dash patterns.
+const NOMINAL_MARKER: f64 = 1.0 / 100.0;
+const HATCH_SPACING: f64 = 1.0 / 100.0;
+const DASH_UNIT: f64 = 1.0 / 400.0;
+/// Segments per full turn when a dashed arc is flattened.
+const DASH_ARC_STEPS: f64 = 360.0;
+/// Baseline-to-baseline distance of vertical text, in character heights (before character spacing).
+const VERTICAL_PITCH: f64 = 1.5;
+/// Longest side, in pixels, that an image is resampled to when it is not axis-aligned.
+const RESAMPLE_SIDE: f64 = 1024.0;
 
 /// Decodes picture `page` (0-based) and returns it with the picture count.
 pub fn decode(data: &[u8], page: u32) -> Result<(dxf::Drawing, u32), String> {
-    let text = data.trim_ascii_start();
-    if text.len() >= 5 && text[..5].eq_ignore_ascii_case(b"BEGMF") {
-        return Err("Clear-text CGM files are not supported, only the binary encoding".into());
-    }
+    let (binary, warning) = if text::is_text(data) { text::transcode(data) } else { (Vec::new(), None) };
+    let data = if binary.is_empty() { data } else { &binary };
     if !(data.len() >= 2 && data[0] == 0 && data[1] & 0xE0 == 0x20) {
-        return Err("Not a binary CGM file".into());
+        return Err("Not a CGM file".into());
     }
     let mut d = Decoder::new(page);
+    d.warning = warning;
     for c in read::commands(data) {
         let c = match c {
             Ok(c) if (c.class, c.id) == (0, 2) => break,
@@ -105,21 +117,37 @@ struct State {
     line_mode: i64,
     edge_mode: i64,
     extent: Option<[P; 2]>,
+    /// BACKGROUND COLOUR, the colour of the page (the VDC extent).
+    background: u32,
+    marker_mode: i64,
     /// `None` until set: the nominal width.
     line_width: Option<f64>,
     line_color: Colour,
+    /// Line and edge types: 1 solid, 2 dash, 3 dot, 4 dash-dot, 5 dash-dot-dot.
+    line_type: i64,
+    marker_type: i64,
+    marker_size: Option<f64>,
+    marker_color: Colour,
     edge_width: Option<f64>,
     edge_color: Colour,
+    edge_type: i64,
     edge_visible: bool,
     /// 0 hollow, 1 solid, 2 pattern, 3 hatch, 4 empty, 5 geometric pattern, 6 interpolated.
     interior: i64,
+    hatch: i64,
     fill_color: Colour,
     text_color: Colour,
     char_height: Option<f64>,
     char_up: P,
     char_base: P,
     expansion: f64,
-    align: (u8, u8),
+    /// Added between characters, in character heights (only drawn for vertical text).
+    spacing: f64,
+    /// 0 right, 1 left, 2 up, 3 down.
+    path: i64,
+    /// TEXT ALIGNMENT's horizontal (0 normal, 1 left, 2 centre, 3 right, 4 continuous) and vertical
+    /// (0 normal, 1 top, 2 cap, 3 half, 4 base, 5 bottom, 6 continuous) values.
+    align: (i64, i64),
 }
 
 impl Default for State {
@@ -135,18 +163,28 @@ impl Default for State {
             line_mode: 1,
             edge_mode: 1,
             extent: None,
+            background: BACKGROUND,
+            marker_mode: 1,
             line_width: None,
             line_color: black,
+            line_type: 1,
+            marker_type: 3,
+            marker_size: None,
+            marker_color: black,
             edge_width: None,
             edge_color: black,
+            edge_type: 1,
             edge_visible: false,
             interior: 0,
+            hatch: 1,
             fill_color: black,
             text_color: black,
             char_height: None,
             char_up: [0.0, 1.0],
             char_base: [1.0, 0.0],
             expansion: 1.0,
+            spacing: 0.0,
+            path: 0,
             align: (0, 0),
         }
     }
@@ -170,21 +208,26 @@ impl State {
         Affine::scale(sign(a[0], b[0]), sign(a[1], b[1]))
     }
 
+    /// A size in VDC from its specification mode: absolute, scaled (by `nominal` of the longest
+    /// side), fractional (of the extent's width) or millimetres. Without a metric scale, millimetres
+    /// are taken as VDC.
+    fn size(&self, mode: i64, value: f64, nominal: f64) -> f64 {
+        let [a, b] = self.extent();
+        match mode {
+            0 => value,
+            1 => value * self.longest_side() * nominal,
+            2 => value * (b[0] - a[0]),
+            _ => value / self.metric.unwrap_or(1.0),
+        }
+        .abs()
+    }
+
     /// Line or edge width in world units (0 is a hairline).
     fn width(&self, mode: i64, value: Option<f64>) -> f64 {
-        let Some(w) = value else { return 0.0 };
-        let vdc = match mode {
-            0 => w,
-            1 if w <= 1.0 => 0.0,
-            1 => w * self.longest_side() * NOMINAL_WIDTH,
-            2 => {
-                let [a, b] = self.extent();
-                w * (b[0] - a[0])
-            }
-            // Millimetres are world units in metric mode; otherwise there is no scale, so take them as VDC.
-            _ => return w.abs(),
-        };
-        vdc.abs() * self.metric.unwrap_or(1.0)
+        match value {
+            Some(w) if mode != 1 || w > 1.0 => self.size(mode, w, NOMINAL_WIDTH) * self.metric.unwrap_or(1.0),
+            _ => 0.0,
+        }
     }
 
     fn color(&self, r: &mut Params) -> R<Colour> {
@@ -244,8 +287,8 @@ struct Decoder {
     metric: Option<f64>,
     aps: Vec<Aps>,
     default_layer: Option<u32>,
-    /// Text waiting for APPEND TEXT: position and characters so far.
-    text: Option<(P, String)>,
+    /// Text waiting for APPEND TEXT: position, characters so far and the box of restricted text.
+    text: Option<(P, String, Option<P>)>,
     tiles: Option<Tiles>,
 }
 
@@ -301,8 +344,15 @@ impl Decoder {
                     }
                 }
             }
-            // END PICTURE
-            5 => self.active = false,
+            // END PICTURE: the VDC extent is the page, painted in the background colour.
+            5 => {
+                if self.active {
+                    let m = self.st.m();
+                    let [a, b] = self.st.extent().map(|p| m.apply(p));
+                    self.world.page(a, b, self.st.background);
+                }
+                self.active = false;
+            }
             _ if !self.active => {}
             // BEGIN FIGURE: its parts are drawn as separate shapes.
             8 => self.world.skip("Figure (parts drawn separately)"),
@@ -378,7 +428,7 @@ impl Decoder {
             19 => {
                 p.components = match r.index()? {
                     1 => 3,
-                    6 => 4,
+                    4 => 4,
                     m => return Err(format!("colour model {m} is not supported")),
                 }
             }
@@ -399,8 +449,10 @@ impl Decoder {
             }
             2 => self.st.direct = r.enumeration()? == 1,
             3 => self.st.line_mode = r.enumeration()?,
+            4 => self.st.marker_mode = r.enumeration()?,
             5 => self.st.edge_mode = r.enumeration()?,
             6 => self.st.extent = Some([r.point()?, r.point()?]),
+            7 => self.st.background = self.st.rgb(r.color_direct()?),
             _ => {}
         }
         Ok(())
@@ -420,30 +472,23 @@ impl Decoder {
         let st = &mut self.st;
         let width = |r: &mut Params, mode: i64| if mode == 0 { r.vdc() } else { r.real() };
         match id {
-            2 | 27 if r.index()? != 1 => self.world.skip("Dashed lines (drawn solid)"),
+            2 => st.line_type = r.index()?,
             3 => st.line_width = Some(width(r, st.line_mode)?),
             4 => st.line_color = st.color(r)?,
+            6 => st.marker_type = r.index()?,
+            7 => st.marker_size = Some(width(r, st.marker_mode)?),
+            8 => st.marker_color = st.color(r)?,
             12 => st.expansion = r.real()?,
+            13 => st.spacing = r.real()?,
             14 => st.text_color = st.color(r)?,
             15 => st.char_height = Some(r.vdc()?),
             16 => (st.char_up, st.char_base) = (r.point()?, r.point()?),
-            17 if r.enumeration()? != 0 => self.world.skip("Vertical or reversed text (drawn left to right)"),
-            18 => {
-                let h = match r.enumeration()? {
-                    2 => 1,
-                    3 => 2,
-                    _ => 0,
-                };
-                let v = match r.enumeration()? {
-                    1 | 2 => 3,
-                    3 => 2,
-                    5 => 1,
-                    _ => 0,
-                };
-                st.align = (h, v);
-            }
+            17 => st.path = r.enumeration()?,
+            18 => st.align = (r.enumeration()?, r.enumeration()?),
             22 => st.interior = r.enumeration()?,
             23 => st.fill_color = st.color(r)?,
+            24 => st.hatch = r.index()?,
+            27 => st.edge_type = r.index()?,
             28 => st.edge_width = Some(width(r, st.edge_mode)?),
             29 => st.edge_color = st.color(r)?,
             30 => st.edge_visible = r.enumeration()? == 1,
@@ -492,29 +537,49 @@ impl Decoder {
         self.pen(self.st.line_color, self.st.width(self.st.line_mode, self.st.line_width))
     }
 
-    fn primitive(&mut self, id: u8, r: &mut Params) -> R<()> {
+    /// Draws `edge` with the line attributes.
+    fn line(&mut self, edge: Edge) {
+        let pen = self.line_pen();
+        self.stroke(edge, pen, self.st.line_type);
+    }
+
+    /// Draws `edge` solid, or dashed in the pattern of `line_type`.
+    fn stroke(&mut self, edge: Edge, pen: Pen, line_type: i64) {
         let m = self.st.m();
+        let Some(pattern) = dash_pattern(line_type) else {
+            return match edge {
+                Edge::Line(points) => self.world.path(points, &m, pen),
+                Edge::Curve { c, u, v, t0, t1 } => self.world.arc(Arc { centre: c, u, v, t0, t1, color: pen.color, width: pen.width, layer: pen.layer }, &m),
+            };
+        };
+        // The dash unit grows with the line width so thick dashes stay longer than they are wide.
+        let unit = (self.st.longest_side() * DASH_UNIT).max(pen.width / self.st.metric.unwrap_or(1.0));
+        for piece in dash(&edge.points(DASH_ARC_STEPS), pattern, unit) {
+            self.world.path(piece, &m, pen);
+        }
+    }
+
+    fn primitive(&mut self, id: u8, r: &mut Params) -> R<()> {
         match id {
             // POLYLINE
-            1 => {
-                let pen = self.line_pen();
-                self.world.path(r.points()?, &m, pen);
-            }
+            1 => self.line(Edge::Line(r.points()?)),
             // DISJOINT POLYLINE
             2 => {
-                let pen = self.line_pen();
                 for pair in r.points()?.chunks_exact(2) {
-                    self.world.path(pair.to_vec(), &m, pen);
+                    self.line(Edge::Line(pair.to_vec()));
                 }
             }
-            // TEXT, RESTRICTED TEXT (its box is ignored) and APPEND TEXT
-            4 | 5 => {
-                if id == 5 {
-                    let _box = (r.vdc()?, r.vdc()?);
+            3 => {
+                for p in r.points()? {
+                    self.marker(p);
                 }
+            }
+            // TEXT, RESTRICTED TEXT (shrunk to fit its box) and APPEND TEXT
+            4 | 5 => {
+                let fit = if id == 5 { Some([r.vdc()?, r.vdc()?]) } else { None };
                 let pos = r.point()?;
                 let last = r.enumeration()? == 1;
-                self.text = Some((pos, r.string()?));
+                self.text = Some((pos, r.string()?, fit));
                 if last {
                     self.flush_text();
                 }
@@ -522,7 +587,7 @@ impl Decoder {
             6 => {
                 let last = r.enumeration()? == 1;
                 let s = r.string()?;
-                if let Some((_, text)) = &mut self.text {
+                if let Some((_, text, _)) = &mut self.text {
                     text.push_str(&s);
                 }
                 if last {
@@ -534,7 +599,7 @@ impl Decoder {
                 let points = r.points()?;
                 let mut closed = points.clone();
                 closed.extend(points.first().copied());
-                self.area(vec![points], |w, m, pen, _| w.path(closed.clone(), m, pen));
+                self.area(vec![points], |_| vec![Edge::Line(closed.clone())]);
             }
             8 => self.polygon_set(r)?,
             9 => self.cell_array(r)?,
@@ -543,7 +608,7 @@ impl Decoder {
                 let ([x0, y0], [x1, y1]) = (r.point()?, r.point()?);
                 let ring = vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
                 let closed = [&ring[..], &ring[..1]].concat();
-                self.area(vec![ring], |w, m, pen, _| w.path(closed.clone(), m, pen));
+                self.area(vec![ring], |_| vec![Edge::Line(closed.clone())]);
             }
             // CIRCLE
             12 => {
@@ -556,10 +621,7 @@ impl Decoder {
                 let close = if id == 14 { Some(r.enumeration()?) } else { None };
                 match three_point_arc(a, b, c) {
                     Some((centre, radius, t0, t1)) => self.arc(centre, [radius, 0.0], [0.0, radius], t0, t1, close),
-                    None => {
-                        let pen = self.line_pen();
-                        self.world.path(vec![a, b, c], &m, pen);
-                    }
+                    None => self.line(Edge::Line(vec![a, b, c])),
                 }
             }
             // CIRCULAR ARC CENTRE (CLOSE, REVERSED)
@@ -587,23 +649,21 @@ impl Decoder {
             26 => {
                 let continuous = r.index()? == 2;
                 let points = r.points()?;
-                let pen = self.line_pen();
                 if continuous {
                     let mut path: Vec<P> = points.iter().take(1).copied().collect();
                     for c in points.get(1..).unwrap_or_default().chunks_exact(3) {
                         bezier(&mut path, [c[0], c[1], c[2]]);
                     }
-                    self.world.path(path, &m, pen);
+                    self.line(Edge::Line(path));
                 } else {
                     for c in points.chunks_exact(4) {
                         let mut path = vec![c[0]];
                         bezier(&mut path, [c[1], c[2], c[3]]);
-                        self.world.path(path, &m, pen);
+                        self.line(Edge::Line(path));
                     }
                 }
             }
             28 | 29 => self.tile(id == 28, r)?,
-            3 => self.world.skip("Polymarker"),
             10 => self.world.skip("Generalized drawing primitive"),
             21 => self.world.skip("Connecting edge"),
             22 => self.world.skip("Hyperbolic arc"),
@@ -615,32 +675,104 @@ impl Decoder {
         Ok(())
     }
 
+    /// Draws the pending text along its text path. Right and left paths are one line (left
+    /// reversed); up and down paths are a column of characters, laid out here.
     fn flush_text(&mut self) {
-        let Some((pos, text)) = self.text.take() else { return };
+        let Some((pos, text, fit)) = self.text.take() else { return };
         let st = &self.st;
-        let height = st.char_height.unwrap_or(st.longest_side() / 100.0).abs();
+        let mut height = st.char_height.unwrap_or(st.longest_side() / 100.0).abs();
+        let vertical = st.path >= 2;
+        // Restricted text keeps within its box's height, and its width when on one line.
+        if let Some([_, box_height]) = fit {
+            height = height.min(box_height.abs());
+        }
+        let fit = fit.filter(|_| !vertical).map_or(0.0, |[w, _]| w.abs());
         let unit = |v: P| {
             let len = v[0].hypot(v[1]);
             if len > 0.0 { [v[0] / len, v[1] / len] } else { v }
         };
         let (x, up) = (unit(st.char_base), unit(st.char_up));
-        let x = [x[0] * height * st.expansion, x[1] * height * st.expansion];
-        let up = [up[0] * height, up[1] * height];
-        let (m, align) = (st.m(), st.align);
+        let scaled = |v: P, f: f64| [v[0] * f, v[1] * f];
+        let (x, upv) = (scaled(x, height * st.expansion), scaled(up, height));
+        // Normal alignment follows the path: left, right, centre or centre; baseline, or top for down.
+        let h = match st.align.0 {
+            1 => 0,
+            2 => 1,
+            3 => 2,
+            _ => [0, 2, 1, 1][st.path.clamp(0, 3) as usize],
+        };
+        let v = match st.align.1 {
+            1 | 2 => 3,
+            3 => 2,
+            4 => 0,
+            5 => 1,
+            _ if st.path == 3 => 3,
+            _ => 0,
+        };
+        let m = st.m();
+        let reversed = st.path == 1 || st.path == 2;
+        let chars: Vec<char> = if reversed { text.chars().rev().collect() } else { text.chars().collect() };
+        let pitch = height * (VERTICAL_PITCH + st.spacing);
         let pen = self.pen(self.st.text_color, 0.0);
-        self.world.text_frame(pos, x, up, align, text, &m, pen);
+        if !vertical {
+            return self.world.text_frame(pos, x, upv, (h, v), chars.into_iter().collect(), fit, &m, pen);
+        }
+        // Distance from the anchor up to the top of the column, which runs from the first
+        // character's top to the last one's baseline.
+        let length = (chars.len().max(1) - 1) as f64 * pitch + height;
+        let top = match v {
+            3 => 0.0,
+            2 => length / 2.0,
+            _ => length,
+        };
+        for (i, c) in chars.into_iter().enumerate() {
+            let at = top - i as f64 * pitch;
+            self.world.text_frame([pos[0] + up[0] * at, pos[1] + up[1] * at], x, upv, (h, 3), c.to_string(), 0.0, &m, pen);
+        }
     }
 
-    /// A filled-area primitive: `rings` are filled or outlined according to the interior style,
-    /// and `edge(world, m, pen, all)` strokes its boundary (`all`: ignore per-edge visibility).
-    fn area(&mut self, rings: Vec<Vec<P>>, edge: impl Fn(&mut World<'static>, &Affine, Pen, bool)) {
+    /// One marker at `p`: a dot, plus, asterisk, circle or cross.
+    fn marker(&mut self, p: P) {
+        let st = &self.st;
+        let size = st.size(st.marker_mode, st.marker_size.unwrap_or(1.0), NOMINAL_MARKER);
+        let (r, kind) = (size / 2.0, st.marker_type);
+        let m = st.m();
+        let pen = self.pen(self.st.marker_color, 0.0);
+        let at = |dx: f64, dy: f64| [p[0] + dx * r, p[1] + dy * r];
+        let d = std::f64::consts::FRAC_1_SQRT_2;
+        let plus = [[at(-1.0, 0.0), at(1.0, 0.0)], [at(0.0, -1.0), at(0.0, 1.0)]];
+        let cross = [[at(-d, -d), at(d, d)], [at(-d, d), at(d, -d)]];
+        let lines: Vec<[P; 2]> = match kind {
+            2 => plus.to_vec(),
+            3 => [plus, cross].concat(),
+            5 => cross.to_vec(),
+            4 => {
+                let circle = Arc { centre: p, u: [r, 0.0], v: [0.0, r], t0: 0.0, t1: TAU, color: pen.color, width: 0.0, layer: pen.layer };
+                return self.world.arc(circle, &m);
+            }
+            // A dot, the smallest visible mark: a small filled disc.
+            _ => {
+                let ring = (0..16).map(|k| k as f64 * TAU / 16.0).map(|t| at(t.cos() / 3.0, t.sin() / 3.0)).collect();
+                return self.world.fill(vec![ring], false, &m, pen);
+            }
+        };
+        for line in lines {
+            self.world.path(line.to_vec(), &m, pen);
+        }
+    }
+
+    /// A filled-area primitive: `rings` are filled, hatched or outlined according to the interior
+    /// style, and `edges(all)` is its boundary (`all`: ignore per-edge visibility).
+    fn area(&mut self, rings: Vec<Vec<P>>, edges: impl Fn(bool) -> Vec<Edge>) {
         let m = self.st.m();
         let fill = self.pen(self.st.fill_color, 0.0);
         match self.st.interior {
-            0 => edge(&mut self.world, &m, fill, true),
+            0 => edges(true).into_iter().for_each(|e| self.stroke(e, fill, 1)),
             3 => {
-                self.world.skip("Hatch fill (outline only)");
-                edge(&mut self.world, &m, fill, true);
+                let spacing = self.st.longest_side() * HATCH_SPACING;
+                for line in hatch(&rings, self.st.hatch, spacing) {
+                    self.world.path(line.to_vec(), &m, fill);
+                }
             }
             4 => {}
             style => {
@@ -652,24 +784,17 @@ impl Decoder {
         }
         if self.st.edge_visible {
             let pen = self.pen(self.st.edge_color, self.st.width(self.st.edge_mode, self.st.edge_width));
-            edge(&mut self.world, &m, pen, false);
+            edges(false).into_iter().for_each(|e| self.stroke(e, pen, self.st.edge_type));
         }
     }
 
     /// The points `c + u·cos t + v·sin t` from `t0` to `t1`: a line if `close` is `None`, else a
     /// filled area closed as a pie (0), a chord (1) or, for -1, a full turn.
     fn arc(&mut self, c: P, u: P, v: P, t0: f64, t1: f64, close: Option<i64>) {
-        let m = self.st.m();
-        let shape = move |pen: Pen| Arc { centre: c, u, v, t0, t1, color: pen.color, width: pen.width, layer: pen.layer };
-        let Some(close) = close else {
-            let pen = self.line_pen();
-            self.world.arc(shape(pen), &m);
-            return;
-        };
-        let at = |t: f64| [c[0] + u[0] * t.cos() + v[0] * t.sin(), c[1] + u[1] * t.cos() + v[1] * t.sin()];
-        let steps = ((t1 - t0).abs() / TAU * ARC_STEPS).ceil().max(4.0) as usize;
-        let mut ring: Vec<P> = (0..=steps).map(|k| at(t0 + (t1 - t0) * k as f64 / steps as f64)).collect();
-        let (start, end) = (at(t0), at(t1));
+        let curve = Edge::Curve { c, u, v, t0, t1 };
+        let Some(close) = close else { return self.line(curve) };
+        let mut ring = curve.points(ARC_STEPS);
+        let (start, end) = (ring[0], ring[ring.len() - 1]);
         let closing = match close {
             0 => vec![end, c, start],
             1 => vec![end, start],
@@ -678,10 +803,7 @@ impl Decoder {
         if close == 0 {
             ring.push(c);
         }
-        self.area(vec![ring], |w, m, pen, _| {
-            w.arc(shape(pen), m);
-            w.path(closing.clone(), m, pen);
-        });
+        self.area(vec![ring], |_| vec![curve.clone(), Edge::Line(closing.clone())]);
     }
 
     /// POLYGON SET: points with edge flags (0 invisible, 1 visible, 2 and 3 the same but closing the ring).
@@ -699,16 +821,15 @@ impl Decoder {
         let segments: Vec<(P, P, bool)> =
             rings.iter().flat_map(|ring| (0..ring.len()).map(move |i| (ring[i].0, ring[(i + 1) % ring.len()].0, ring[i].1))).collect();
         let rings = rings.into_iter().map(|ring| ring.into_iter().map(|(p, _)| p).collect()).collect();
-        self.area(rings, |w, m, pen, all| {
-            let mut run: Vec<P> = Vec::new();
+        self.area(rings, |all| {
+            let mut runs: Vec<Vec<P>> = Vec::new();
             for &(a, b, _) in segments.iter().filter(|s| s.2 || all) {
-                if run.last() != Some(&a) {
-                    w.path(std::mem::take(&mut run), m, pen);
-                    run.push(a);
+                match runs.last_mut() {
+                    Some(run) if run.last() == Some(&a) => run.push(b),
+                    _ => runs.push(vec![a, b]),
                 }
-                run.push(b);
             }
-            w.path(run, m, pen);
+            runs.into_iter().map(Edge::Line).collect()
         });
         Ok(())
     }
@@ -809,27 +930,66 @@ impl Decoder {
     /// along `col` (VDC vectors spanning the whole image). Only axis-aligned placements are drawn.
     fn place(&mut self, image: Image, p: P, row: P, col: P) {
         let m = self.st.m();
-        let (row, col) = (m.linear(row), m.linear(col));
+        let (p, row, col) = (m.apply(p), m.linear(row), m.linear(col));
+        let layer = self.layer();
         let (Some(pel_path), Some(col_angle)) = (axis(row), axis(col)) else {
-            self.world.skip("Rotated raster image");
-            return;
+            return self.resampled(image, p, row, col, layer);
         };
         let line_prog = (col_angle + 360 - pel_path) % 360;
         if line_prog % 180 != 90 {
-            self.world.skip("Rotated raster image");
-            return;
+            return self.resampled(image, p, row, col, layer);
         }
         let image = match image {
             Image::Bilevel(b) => Image::Bilevel(b.oriented(pel_path, line_prog)),
             Image::Color(c) => Image::Color(c.oriented(pel_path, line_prog)),
         };
-        let p = m.apply(p);
         let corners = [p, [p[0] + row[0], p[1] + row[1]], [p[0] + col[0], p[1] + col[1]], [p[0] + row[0] + col[0], p[1] + row[1] + col[1]]];
         let left = corners.iter().map(|c| c[0]).fold(f64::INFINITY, f64::min);
         let top = corners.iter().map(|c| c[1]).fold(f64::NEG_INFINITY, f64::max);
         let px = (row[0].abs() + col[0].abs()) / image.size().0 as f64;
-        let layer = self.layer();
         self.world.image(image, [left, top], px, layer);
+    }
+
+    /// Places a rotated or skewed image (world coordinates) as an axis-aligned one: resampled to
+    /// its bounding box, white (transparent) outside it.
+    fn resampled(&mut self, image: Image, p: P, row: P, col: P, layer: u32) {
+        let det = row[0] * col[1] - row[1] * col[0];
+        let (w, h) = image.size();
+        if det == 0.0 || w == 0 || h == 0 {
+            return;
+        }
+        let corners = [p, add(p, row), add(p, col), add(add(p, row), col)];
+        let (left, right) = (corners.iter().map(|c| c[0]).fold(f64::INFINITY, f64::min), corners.iter().map(|c| c[0]).fold(f64::NEG_INFINITY, f64::max));
+        let (bottom, top) = (corners.iter().map(|c| c[1]).fold(f64::INFINITY, f64::min), corners.iter().map(|c| c[1]).fold(f64::NEG_INFINITY, f64::max));
+        // No coarser than a source cell, and fine enough that the slanted edges look straight.
+        let cell = (row[0].hypot(row[1]) / w as f64).min(col[0].hypot(col[1]) / h as f64);
+        let px = cell.min((right - left).max(top - bottom) / RESAMPLE_SIDE).max((right - left) * (top - bottom) / MAX_RESAMPLED as f64).max(1e-12);
+        let (ow, oh) = (((right - left) / px).ceil().max(1.0) as u32, ((top - bottom) / px).ceil().max(1.0) as u32);
+        // The source cell under the centre of output pixel (i, j), if any.
+        let source = |i: u32, j: u32| {
+            let d = [left + (i as f64 + 0.5) * px - p[0], top - (j as f64 + 0.5) * px - p[1]];
+            let (a, b) = ((d[0] * col[1] - d[1] * col[0]) / det, (row[0] * d[1] - row[1] * d[0]) / det);
+            ((0.0..1.0).contains(&a) && (0.0..1.0).contains(&b)).then(|| ((a * w as f64) as u32, (b * h as f64) as u32))
+        };
+        let out = match image {
+            Image::Bilevel(b) => {
+                let mut out = Bitmap::new(ow, oh);
+                for j in 0..oh {
+                    for i in 0..ow {
+                        if source(i, j).is_some_and(|(x, y)| b.get(x, y)) {
+                            out.set(i, j);
+                        }
+                    }
+                }
+                Image::Bilevel(out)
+            }
+            Image::Color(c) => {
+                let white = rgb(255, 255, 255);
+                let data = (0..oh).flat_map(|j| (0..ow).map(move |i| (i, j))).map(|(i, j)| source(i, j).map_or(white, |(x, y)| c.get(x, y))).collect();
+                Image::Color(RgbaImage { width: ow, height: oh, data })
+            }
+        };
+        self.world.image(out, [left, top], px, layer);
     }
 }
 
@@ -865,6 +1025,128 @@ fn axis(v: P) -> Option<u32> {
 
 fn sub(a: P, b: P) -> P {
     [a[0] - b[0], a[1] - b[1]]
+}
+
+fn add(a: P, b: P) -> P {
+    [a[0] + b[0], a[1] + b[1]]
+}
+
+/// Upper bound on a resampled image's pixels.
+const MAX_RESAMPLED: u64 = 16_000_000;
+
+/// A boundary piece in VDC: a polyline or the arc `c + u·cos t + v·sin t` from `t0` to `t1`.
+#[derive(Clone)]
+enum Edge {
+    Line(Vec<P>),
+    Curve { c: P, u: P, v: P, t0: f64, t1: f64 },
+}
+
+impl Edge {
+    /// The points along the edge, arcs at `steps` segments per full turn.
+    fn points(&self, steps: f64) -> Vec<P> {
+        match *self {
+            Edge::Line(ref points) => points.clone(),
+            Edge::Curve { c, u, v, t0, t1 } => {
+                let n = ((t1 - t0).abs() / TAU * steps).ceil().max(4.0) as usize;
+                (0..=n)
+                    .map(|k| t0 + (t1 - t0) * k as f64 / n as f64)
+                    .map(|t| [c[0] + u[0] * t.cos() + v[0] * t.sin(), c[1] + u[1] * t.cos() + v[1] * t.sin()])
+                    .collect()
+            }
+        }
+    }
+}
+
+/// On and off lengths, in dash units, of line types 2–5; `None` for solid (1, and types not defined by the standard).
+fn dash_pattern(line_type: i64) -> Option<&'static [f64]> {
+    match line_type {
+        2 => Some(&[6.0, 3.0]),
+        3 => Some(&[0.5, 2.5]),
+        4 => Some(&[6.0, 2.0, 0.5, 2.0]),
+        5 => Some(&[6.0, 2.0, 0.5, 2.0, 0.5, 2.0]),
+        _ => None,
+    }
+}
+
+/// The dashes of `points` in `pattern` (alternating on and off lengths, times `unit`), the pattern
+/// running on across vertices.
+fn dash(points: &[P], pattern: &[f64], unit: f64) -> Vec<Vec<P>> {
+    let mut out = Vec::new();
+    let (mut k, mut left) = (0, pattern[0] * unit);
+    let mut current: Vec<P> = points.iter().take(1).copied().collect();
+    for seg in points.windows(2) {
+        let (a, b) = (seg[0], seg[1]);
+        let len = sub(b, a)[0].hypot(sub(b, a)[1]);
+        let mut done = 0.0;
+        while len - done > left {
+            done += left;
+            let t = done / len;
+            let p = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+            if k % 2 == 0 {
+                current.push(p);
+                out.push(std::mem::take(&mut current));
+            } else {
+                current = vec![p];
+            }
+            k = (k + 1) % pattern.len();
+            left = pattern[k] * unit;
+        }
+        left -= len - done;
+        if k % 2 == 0 {
+            current.push(b);
+        }
+    }
+    if k % 2 == 0 && current.len() >= 2 {
+        out.push(current);
+    }
+    out
+}
+
+/// Hatch lines across `rings` (even-odd) for hatch index 1–6: horizontal, vertical, +45°, −45°,
+/// horizontal and vertical, and both diagonals. Lines are `spacing` apart, aligned to the VDC origin.
+fn hatch(rings: &[Vec<P>], index: i64, spacing: f64) -> Vec<[P; 2]> {
+    let angles: &[f64] = match index {
+        2 => &[90.0],
+        3 => &[45.0],
+        4 => &[135.0],
+        5 => &[0.0, 90.0],
+        6 => &[45.0, 135.0],
+        _ => &[0.0],
+    };
+    let mut out = Vec::new();
+    if spacing <= 0.0 {
+        return out;
+    }
+    for angle in angles {
+        let (s, c) = angle.to_radians().sin_cos();
+        // Lines run along d = (c, s); n = (−s, c) measures across them.
+        let across = |p: P| -p[0] * s + p[1] * c;
+        let along = |p: P| p[0] * c + p[1] * s;
+        let all = rings.iter().flatten();
+        let lo = all.clone().map(|&p| across(p)).fold(f64::INFINITY, f64::min);
+        let hi = all.map(|&p| across(p)).fold(f64::NEG_INFINITY, f64::max);
+        if !lo.is_finite() {
+            continue;
+        }
+        for k in (lo / spacing).ceil() as i64..=(hi / spacing).floor() as i64 {
+            let offset = k as f64 * spacing;
+            let mut hits: Vec<f64> = Vec::new();
+            for ring in rings {
+                for i in 0..ring.len() {
+                    let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+                    let (da, db) = (across(a) - offset, across(b) - offset);
+                    if (da <= 0.0) != (db <= 0.0) {
+                        let t = da / (da - db);
+                        hits.push(along([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]));
+                    }
+                }
+            }
+            hits.sort_by(f64::total_cmp);
+            let point = |t: f64| [t * c - offset * s, t * s + offset * c];
+            out.extend(hits.chunks_exact(2).map(|h| [point(h[0]), point(h[1])]));
+        }
+    }
+    out
 }
 
 /// The parameter `t` at which `u·cos t + v·sin t` points along `d`.
@@ -1018,8 +1300,36 @@ mod tests {
         let d = decode1(&[cmd(5, 22, &ints(&[4])), cmd(5, 30, &ints(&[1])), set]);
         assert_eq!((d.fills.len(), d.paths.len()), (0, 2));
         assert_eq!(d.paths[0].points.len(), 3);
-        let d = decode1(&[cmd(5, 22, &ints(&[3])), triangle]);
-        assert!(d.info.iter().any(|(_, v)| v.contains("Hatch fill (outline only) × 1")));
+        // Horizontal hatch across a 10 × 10 square, 1.5 apart (the extent's longest side / 100): y = 1.5 to 10.5.
+        let square = cmd(4, 11, &ints(&[1, 1, 11, 11]));
+        let extent = cmd(2, 6, &ints(&[0, 0, 150, 150]));
+        let d = decode1(&[extent.clone(), cmd(5, 22, &ints(&[3])), square.clone()]);
+        assert_eq!((d.fills.len(), d.paths.len()), (0, 7));
+        assert!(d.paths.iter().all(|p| p.points.len() == 2 && (p.points[0][0] - p.points[1][0]).abs() == 10.0));
+        // Crosshatch: both directions.
+        let d = decode1(&[extent, cmd(5, 22, &ints(&[3])), cmd(5, 24, &ints(&[5])), square]);
+        assert_eq!(d.paths.len(), 14);
+    }
+
+    #[test]
+    fn line_types_and_markers() {
+        // A dashed line 6 + 3 units of 1/400 of the 400-unit extent: 100 units hold 11 dashes and a part.
+        let d = decode1(&[cmd(2, 6, &ints(&[0, 0, 400, 400])), cmd(5, 2, &ints(&[2])), polyline(&[0, 0, 100, 0])]);
+        assert_eq!(d.paths.len(), 12);
+        assert_eq!(d.paths[0].points[1][0] - d.paths[0].points[0][0], 6.0);
+        // Dashed edges of a circle are flattened.
+        let d = decode1(&[cmd(2, 6, &ints(&[0, 0, 100, 100])), cmd(5, 22, &ints(&[4])), cmd(5, 30, &ints(&[1])), cmd(5, 27, &ints(&[3])), cmd(4, 12, &ints(&[0, 0, 10]))]);
+        assert!(d.arcs.is_empty() && d.paths.len() > 1);
+        // Plus, circle and dot markers.
+        let d = decode1(&[cmd(5, 6, &ints(&[2])), cmd(4, 3, &ints(&[0, 0])), cmd(5, 6, &ints(&[4])), cmd(4, 3, &ints(&[9, 9])), cmd(5, 6, &ints(&[1])), cmd(4, 3, &ints(&[5, 5]))]);
+        assert_eq!((d.paths.len(), d.arcs.len(), d.fills.len()), (2, 1, 1));
+    }
+
+    #[test]
+    fn colour_model_cmyk() {
+        // CMYK (model 4): full cyan and yellow is green.
+        let d = decode(&file(&[cmd(1, 19, &ints(&[4]))], &[&[cmd(2, 2, &ints(&[1])), cmd(5, 4, &[255, 0, 255, 0]), polyline(&[0, 0, 1, 1])]]), 0).unwrap().0;
+        assert_eq!(d.paths[0].color, 0x00FF00);
     }
 
     #[test]
@@ -1058,15 +1368,36 @@ mod tests {
             cmd(4, 6, &[&ints(&[1])[..], &s("C")].concat()),
         ]);
         let t = &d.texts[0];
-        assert_eq!((t.text.as_str(), t.halign, t.valign, t.up, t.x), ("ABC", 1, 2, [0.0, -5.0], [5.0, 0.0]));
+        assert_eq!((t.text.as_str(), t.halign, t.valign, t.up, t.x, t.fit), ("ABC", 1, 2, [0.0, -5.0], [5.0, 0.0], 0.0));
+        // Left path: reversed and right-aligned. Down path: one centred character per line, top-aligned.
+        let d = decode1(&[cmd(5, 15, &ints(&[2])), cmd(5, 17, &ints(&[1])), cmd(4, 4, &[&ints(&[10, 10, 1])[..], &s("AB")].concat())]);
+        assert_eq!((d.texts[0].text.as_str(), d.texts[0].halign), ("BA", 2));
+        let d = decode1(&[cmd(5, 15, &ints(&[2])), cmd(5, 17, &ints(&[3])), cmd(4, 4, &[&ints(&[10, 10, 1])[..], &s("AB")].concat())]);
+        let texts: Vec<_> = d.texts.iter().map(|t| (t.text.as_str(), t.halign, t.valign)).collect();
+        assert_eq!(texts, [("A", 1, 3), ("B", 1, 3)]);
+        assert_eq!(d.texts[1].pos[1] - d.texts[0].pos[1], 2.0 * VERTICAL_PITCH);
+        // Restricted text fits its box: width 20, height capped at 3.
+        let d = decode1(&[cmd(5, 15, &ints(&[5])), cmd(4, 5, &[&ints(&[20, 3, 10, 10, 1])[..], &s("Wide")].concat())]);
+        assert_eq!((d.texts[0].fit, d.texts[0].up), (20.0, [0.0, -3.0]));
         // With Y down and an up vector of (0, -1), text still reads upright.
         let d = decode1(&[cmd(2, 6, &ints(&[0, 100, 100, 0])), cmd(5, 16, &ints(&[0, -1, 1, 0])), cmd(4, 4, &[&ints(&[10, 10, 1])[..], &s("A")].concat())]);
         assert!(d.texts[0].up[1] < 0.0 && d.texts[0].x[0] > 0.0);
     }
 
     #[test]
+    fn page_is_the_extent_in_the_background_colour() {
+        // The page reaches beyond the line; drawing outside it still widens the drawing.
+        let d = decode1(&[cmd(2, 6, &ints(&[0, 0, 100, 50])), cmd(2, 7, &[10, 3, 16]), polyline(&[10, 10, 20, 20])]);
+        let b = d.background.as_ref().unwrap();
+        assert_eq!((b.pos, b.size, b.color, d.width, d.height), ([0.0, 0.0], [100.0, 50.0], 0x0A0310, 100.0, 50.0));
+        let d = decode1(&[cmd(2, 6, &ints(&[0, 0, 100, 50])), polyline(&[0, -10, 0, 0])]);
+        assert_eq!((d.background.as_ref().unwrap().color, d.height), (BACKGROUND, 60.0));
+    }
+
+    #[test]
     fn pictures_are_pages() {
-        let data = file(&[cmd(1, 2, &s("Demo"))], &[&[polyline(&[0, 0, 1, 1])], &[polyline(&[0, 0, 2, 2])]]);
+        let extent = |n: i16| cmd(2, 6, &ints(&[0, 0, n, n]));
+        let data = file(&[cmd(1, 2, &s("Demo"))], &[&[extent(1), polyline(&[0, 0, 1, 1])], &[extent(2), polyline(&[0, 0, 2, 2])]]);
         let (d, pages) = decode(&data, 1).unwrap();
         assert_eq!((pages, d.width), (2, 2.0));
         assert!(d.info.contains(&("Picture".into(), "Sheet 2".into())));
@@ -1087,14 +1418,25 @@ mod tests {
         let (black, red) = (rgb(0, 0, 0), rgb(255, 0, 0));
         // Packed: first row from P (0, 10) towards R (20, 10).
         let packed = |p: [i16; 6]| cmd(4, 9, &[&ints(&p)[..], &ints(&[2, 1, 0, 1]), &[1, 2]].concat());
-        let d = decode1(&[table.clone(), packed([0, 10, 20, 0, 20, 10])]);
+        let extent = cmd(2, 6, &ints(&[0, 0, 20, 10]));
+        let d = decode1(&[extent.clone(), table.clone(), packed([0, 10, 20, 0, 20, 10])]);
         assert_eq!((d.images[0].pos, d.images[0].px, pixels(&d)), ([0.0, 0.0], 10.0, vec![black, red]));
         // P on the right: the row runs leftwards.
         let d = decode1(&[table.clone(), packed([20, 10, 0, 0, 0, 10])]);
         assert_eq!(pixels(&d), [red, black]);
         // Run length: a run of 2 cells of colour 2.
-        let d = decode1(&[table, cmd(4, 9, &[&ints(&[0, 10, 20, 0, 20, 10, 2, 1, 0, 0, 2])[..], &[2]].concat())]);
+        let d = decode1(&[table.clone(), cmd(4, 9, &[&ints(&[0, 10, 20, 0, 20, 10, 2, 1, 0, 0, 2])[..], &[2]].concat())]);
         assert_eq!(pixels(&d), [red, red]);
+        // Skewed: rows run from P (0, 0) to R (20, 10), the column from R to Q (30, 10). Resampled
+        // into its 30 × 10 bounding box, white outside the parallelogram.
+        let d = decode1(&[cmd(2, 6, &ints(&[0, 0, 30, 10])), table, packed([0, 0, 30, 10, 20, 10])]);
+        let i = &d.images[0];
+        let Image::Color(c) = &i.image else { panic!("expected colour") };
+        assert_eq!(i.pos, [0.0, 0.0]);
+        assert!((c.width as f64 * i.px - 30.0).abs() < i.px && (c.height as f64 * i.px - 10.0).abs() < i.px);
+        let at = |x: f64, y: f64| c.get((x / i.px) as u32, (y / i.px) as u32);
+        // Image (x, y) is world (x, 10 − y).
+        assert_eq!((at(5.0, 9.0), at(25.0, 1.0), at(29.0, 9.0)), (black, red, rgb(255, 255, 255)));
     }
 
     #[test]
@@ -1108,7 +1450,7 @@ mod tests {
         let one = [0, 1, 0, 0];
         let begin = [&ints(&[0, 4, 0, 1, 1, 1, 8, 4])[..], &one, &one, &ints(&[0, 0, 8, 4])].concat();
         let tile = [&ints(&[2, 0])[..], &[0, 1, 0], &g4].concat();
-        let d = decode1(&[cmd(0, 19, &begin), cmd(4, 28, &tile), cmd(0, 20, &[])]);
+        let d = decode1(&[cmd(2, 6, &ints(&[0, 0, 8, 4])), cmd(0, 19, &begin), cmd(4, 28, &tile), cmd(0, 20, &[])]);
         let i = &d.images[0];
         assert_eq!((i.pos, i.px), ([0.0, 0.0], 1.0));
         match &i.image {
@@ -1134,10 +1476,9 @@ mod tests {
 
     #[test]
     fn rejects_other_files_and_lists_skipped_elements() {
-        assert!(decode(b"BEGMF 'x';", 0).err().unwrap().contains("Clear-text"));
         assert!(decode(b"\x00\x00junk", 0).is_err());
         assert!(decode(&file(&[], &[]), 0).is_err());
-        let d = decode1(&[cmd(4, 3, &ints(&[0, 0])), polyline(&[0, 0, 1, 1])]);
-        assert!(d.info.iter().any(|(k, v)| k == "Not drawn" && v == "Polymarker × 1"));
+        let d = decode1(&[cmd(4, 10, &ints(&[0, 0])), polyline(&[0, 0, 1, 1])]);
+        assert!(d.info.iter().any(|(k, v)| k == "Not drawn" && v == "Generalized drawing primitive × 1"));
     }
 }

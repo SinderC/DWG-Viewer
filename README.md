@@ -25,12 +25,14 @@ the built page's Content-Security-Policy blocks all network access. Supported fo
   curves and arcs, text (in the viewer's font), PNG/JPEG/TIFF image fills, transforms and resource
   dictionaries. Not drawn: gradients (drawn in their first colour), visual brushes, clipping, opacity.
   Tested only on synthetic files.
-- **CGM** (binary encoding, including WebCGM): one page per picture; polylines, polygons and polygon
-  sets, rectangles, circles, ellipses and their arcs (open, pie and chord), Béziers, text, colour
-  tables and direct colour, line and edge widths, solid fills, cell arrays, Group 4/JPEG/PNG tiles and
-  WebCGM layers. Not drawn: markers, line types (drawn solid), hatch and pattern fills (hatches as
-  outlines, patterns solid), NURBS and conics, clipping, rotated images; clear-text CGM is not read.
-  Tested only on synthetic files.
+- **CGM** (binary and clear-text encodings, including WebCGM): one page per picture; polylines, polygons and polygon
+  sets, rectangles, circles, ellipses and their arcs (open, pie and chord), Béziers, markers, text
+  (all four text paths; restricted text shrunk to its box), colour tables and direct colour (RGB, CMYK),
+  line and edge widths and types, solid and hatch fills, cell arrays (rotated or skewed too),
+  Group 4/JPEG/PNG tiles and WebCGM layers. Not drawn: pattern fills (drawn solid), NURBS and conics,
+  clipping, character spacing on horizontal text. Nominal marker size, hatch spacing and dash lengths
+  are device-dependent in the standard and chosen here. Clear-text tiles and layers are tested only on
+  synthetic input.
 
 **Live app:** https://sinderc.github.io/DWG-Viewer/ (deployed from `main` by GitHub Actions).
 To use it offline, save the page (File → Save Page As) — it is a single self-contained HTML file.
@@ -79,7 +81,7 @@ cargo run --release --example make_cgm -- samples                               
   DXF parsing and block expansion into paths, exact arcs and text (`dxf/`), DWG entities mapped onto
   the same output via `acadrust` (`dwg.rs`), HP-GL/2 interpreter plus PJL/PCL/RTL unwrapping onto the same
   output (`hpgl/`), DWF W2D interpreter, ZIP/package reading and DWFx (XPS) pages onto the same output (`dwf/`), binary CGM
-  interpreter onto the same output (`cgm/`)
+  interpreter, with clear text transcoded to binary, onto the same output (`cgm/`)
 - `web/src/formats` — format plugin interface (`types.ts`), shared WASM adapter (`wasm.ts`), CALS, TIFF,
   DXF, DWG, HP-GL, DWF and CGM plugins (`dxf.ts` draws all vector geometry with Canvas 2D)
 - `web/src/viewer.ts` — canvas view, mouse zoom/pan

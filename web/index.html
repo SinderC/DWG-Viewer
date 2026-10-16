@@ -55,7 +55,8 @@
         user-select: none;
       }
       [hidden] { display: none !important; }
-      svg.icon { width: 20px; height: 20px; fill: currentColor; }
+      /* Visible overflow: at fractional positions the box would clip the shapes' anti-aliased edges. */
+      svg.icon { width: 20px; height: 20px; fill: currentColor; overflow: visible; }
       :is(#toolbar, #find-bar) svg.icon { width: 16px; height: 16px; }
 
       /* Floating translucent material for all chrome. */
@@ -333,8 +334,22 @@
         z-index: 3;
       }
       #toast.show { transform: translate(-50%, 0); opacity: 1; pointer-events: auto; }
-      /* Errors wrap so all of the message can be read. */
-      #toast.error { width: max-content; max-width: min(560px, calc(100vw - 32px)); border-radius: 14px; color: var(--error); white-space: normal; text-align: center; overflow-wrap: anywhere; }
+      /* Errors wrap so all of the message can be read. The text stays full-contrast on the denser
+         sheet material; red goes on the solid icon, since coloured text on glass is hard to read. */
+      #toast.error {
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+        width: max-content;
+        max-width: min(560px, calc(100vw - 32px));
+        padding: 10px 16px 10px 12px;
+        border-radius: 14px;
+        background: var(--sheet);
+        white-space: normal;
+        overflow-wrap: anywhere;
+      }
+      #toast svg { display: none; }
+      #toast.error svg { display: block; flex: none; color: var(--error); }
 
       /* Sheets materialize: scale and fade in, the page dims behind them. */
       dialog {
@@ -373,11 +388,11 @@
         button:active:not(:disabled) { transform: none; }
       }
       @media (prefers-reduced-transparency: reduce) {
-        .glass, dialog.glass, .menu.glass { background: var(--glass-solid); -webkit-backdrop-filter: none; backdrop-filter: none; }
+        .glass, dialog.glass, .menu.glass, #toast.error { background: var(--glass-solid); -webkit-backdrop-filter: none; backdrop-filter: none; }
       }
       @media (prefers-contrast: more) {
         :root { --glass-border: var(--fg); --separator: var(--muted); }
-        .glass, dialog.glass, .menu.glass { background: var(--glass-solid); -webkit-backdrop-filter: none; backdrop-filter: none; }
+        .glass, dialog.glass, .menu.glass, #toast.error { background: var(--glass-solid); -webkit-backdrop-filter: none; backdrop-filter: none; }
       }
     </style>
   </head>
@@ -398,6 +413,7 @@
       <symbol id="i-up" viewBox="0 0 448 512"><path d="M201.4 105.4c12.5-12.5 32.8-12.5 45.3 0l192 192c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L224 173.3 54.6 342.6c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3l192-192z" /></symbol>
       <symbol id="i-down" viewBox="0 0 448 512"><path d="M201.4 406.6c12.5 12.5 32.8 12.5 45.3 0l192-192c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0L224 338.7 54.6 169.4c-12.5-12.5-32.8-12.5-45.3 0s-12.5 32.8 0 45.3l192 192z" /></symbol>
       <symbol id="i-close" viewBox="0 0 384 512"><path d="M55.1 73.4c-12.5-12.5-32.8-12.5-45.3 0s-12.5 32.8 0 45.3L147.2 256 9.9 393.4c-12.5 12.5-12.5 32.8 0 45.3s32.8 12.5 45.3 0L192.5 301.3 329.9 438.6c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L237.8 256 375.1 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0L192.5 210.7 55.1 73.4z" /></symbol>
+      <symbol id="i-error" viewBox="0 0 512 512"><path d="M256 512a256 256 0 1 1 0-512 256 256 0 1 1 0 512zm0-192a32 32 0 1 0 0 64 32 32 0 1 0 0-64zm0-192c-18.2 0-32.7 15.5-31.4 33.7l7.4 104c.9 12.6 11.4 22.3 23.9 22.3 12.6 0 23-9.7 23.9-22.3l7.4-104c1.3-18.2-13.1-33.7-31.4-33.7z" /></symbol>
       <symbol id="i-info" viewBox="0 0 512 512"><path d="M256 512a256 256 0 1 0 0-512 256 256 0 1 0 0 512zM224 160a32 32 0 1 1 64 0 32 32 0 1 1 -64 0zm-8 64l48 0c13.3 0 24 10.7 24 24l0 88 8 0c13.3 0 24 10.7 24 24s-10.7 24-24 24l-80 0c-13.3 0-24-10.7-24-24s10.7-24 24-24l24 0 0-64-24 0c-13.3 0-24-10.7-24-24s10.7-24 24-24z" /></symbol>
       <symbol id="i-keys" viewBox="0 0 576 512"><path d="M64 64C28.7 64 0 92.7 0 128L0 384c0 35.3 28.7 64 64 64l448 0c35.3 0 64-28.7 64-64l0-256c0-35.3-28.7-64-64-64L64 64zm16 64l32 0c8.8 0 16 7.2 16 16l0 32c0 8.8-7.2 16-16 16l-32 0c-8.8 0-16-7.2-16-16l0-32c0-8.8 7.2-16 16-16zM64 240c0-8.8 7.2-16 16-16l32 0c8.8 0 16 7.2 16 16l0 32c0 8.8-7.2 16-16 16l-32 0c-8.8 0-16-7.2-16-16l0-32zM176 128l32 0c8.8 0 16 7.2 16 16l0 32c0 8.8-7.2 16-16 16l-32 0c-8.8 0-16-7.2-16-16l0-32c0-8.8 7.2-16 16-16zM160 240c0-8.8 7.2-16 16-16l32 0c8.8 0 16 7.2 16 16l0 32c0 8.8-7.2 16-16 16l-32 0c-8.8 0-16-7.2-16-16l0-32zm16 80l224 0c8.8 0 16 7.2 16 16l0 32c0 8.8-7.2 16-16 16l-224 0c-8.8 0-16-7.2-16-16l0-32c0-8.8 7.2-16 16-16zm80-176c0-8.8 7.2-16 16-16l32 0c8.8 0 16 7.2 16 16l0 32c0 8.8-7.2 16-16 16l-32 0c-8.8 0-16-7.2-16-16l0-32zm16 80l32 0c8.8 0 16 7.2 16 16l0 32c0 8.8-7.2 16-16 16l-32 0c-8.8 0-16-7.2-16-16l0-32c0-8.8 7.2-16 16-16zm80-80c0-8.8 7.2-16 16-16l32 0c8.8 0 16 7.2 16 16l0 32c0 8.8-7.2 16-16 16l-32 0c-8.8 0-16-7.2-16-16l0-32zm16 80l32 0c8.8 0 16 7.2 16 16l0 32c0 8.8-7.2 16-16 16l-32 0c-8.8 0-16-7.2-16-16l0-32c0-8.8 7.2-16 16-16zm80-80c0-8.8 7.2-16 16-16l32 0c8.8 0 16 7.2 16 16l0 32c0 8.8-7.2 16-16 16l-32 0c-8.8 0-16-7.2-16-16l0-32zm16 80l32 0c8.8 0 16 7.2 16 16l0 32c0 8.8-7.2 16-16 16l-32 0c-8.8 0-16-7.2-16-16l0-32c0-8.8 7.2-16 16-16z" /></symbol>
       <symbol id="i-prev" viewBox="0 0 320 512"><path d="M9.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l192 192c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L77.3 256 246.6 86.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-192 192z" /></symbol>
@@ -479,7 +495,7 @@
     <div id="minimap" class="glass"><canvas aria-label="Overview: click to move there"></canvas></div>
     <div id="coords" class="glass" hidden></div>
     <div id="weight-menu" class="glass menu" popover role="menu" aria-label="Line width"></div>
-    <div id="toast" class="glass" role="status" aria-live="polite"></div>
+    <div id="toast" class="glass" role="status" aria-live="polite"><svg class="icon" aria-hidden="true"><use href="#i-error" /></svg><span></span></div>
 
     <dialog id="info-dialog" class="glass" aria-labelledby="info-title">
       <form method="dialog">
