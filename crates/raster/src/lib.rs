@@ -2,6 +2,7 @@
 
 pub mod bitmap;
 pub mod cals;
+pub mod cgm;
 pub mod dwf;
 pub mod dwg;
 pub mod dxf;
@@ -98,7 +99,7 @@ impl RasterDoc {
     }
 }
 
-/// A DXF, DWG, HP-GL or DWF drawing as flat arrays for the canvas renderer. Coordinates are in drawing
+/// A DXF, DWG, HP-GL, DWF or CGM drawing as flat arrays for the canvas renderer. Coordinates are in drawing
 /// units, relative to the top-left of the extents with Y down. Colours are 0xRRGGBB, `FOREGROUND`
 /// or `BACKGROUND`.
 #[wasm_bindgen]
@@ -130,6 +131,13 @@ impl DxfDoc {
     #[wasm_bindgen(js_name = openDwf)]
     pub fn open_dwf(data: &[u8], page: u32) -> Result<DxfDoc, JsError> {
         let (drawing, pages) = dwf::decode(data, page).map_err(|e| JsError::new(&e))?;
+        Ok(DxfDoc { drawing, pages })
+    }
+
+    /// Opens picture `page` (0-based) of a binary CGM file.
+    #[wasm_bindgen(js_name = openCgm)]
+    pub fn open_cgm(data: &[u8], page: u32) -> Result<DxfDoc, JsError> {
+        let (drawing, pages) = cgm::decode(data, page).map_err(|e| JsError::new(&e))?;
         Ok(DxfDoc { drawing, pages })
     }
 

@@ -5,7 +5,7 @@
 //! `descriptor.xml` names its W2D streams, paper size and the logical-to-paper transform. A DWFx
 //! file is an XPS package (see `xps`).
 
-mod image;
+pub(crate) mod image;
 mod palette;
 mod w2d;
 mod xml;

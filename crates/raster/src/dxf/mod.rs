@@ -256,7 +256,7 @@ impl<'a> World<'a> {
         self.images.push(PlacedImage { image, pos, px, layer });
     }
 
-    fn arc(&mut self, a: Arc, m: &Affine) {
+    pub(crate) fn arc(&mut self, a: Arc, m: &Affine) {
         self.arcs.push(Arc { centre: m.apply(a.centre), u: m.linear(a.u), v: m.linear(a.v), ..a });
     }
 
@@ -302,9 +302,15 @@ impl<'a> World<'a> {
             return;
         }
         let (s, c) = rotation.sin_cos();
-        let x = m.linear([c * height * width, s * height * width]);
-        let up = m.linear([-s * height, c * height]);
-        self.texts.push(Text { pos: m.apply(pos), x, up, halign, valign, text, color: pen.color, layer: pen.layer });
+        self.text_frame(pos, [c * height * width, s * height * width], [-s * height, c * height], (halign, valign), text, m, pen);
+    }
+
+    /// Text in glyph space spanned by `x` and `up` (see [`Text`]), which need not be perpendicular.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn text_frame(&mut self, pos: P, x: P, up: P, (halign, valign): (u8, u8), text: String, m: &Affine, pen: Pen) {
+        if !text.trim().is_empty() {
+            self.texts.push(Text { pos: m.apply(pos), x: m.linear(x), up: m.linear(up), halign, valign, text, color: pen.color, layer: pen.layer });
+        }
     }
 
     pub(crate) fn finish(self, units: &'static str, mut info: Vec<(String, String)>) -> Result<Drawing, String> {

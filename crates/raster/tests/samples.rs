@@ -1,4 +1,4 @@
-//! Decodes every file in ./samples (CALS, TIFF, DXF, DWG, HP-GL, DWF) (git-ignored). Run with `cargo test --release -- --ignored --nocapture`.
+//! Decodes every file in ./samples (CALS, TIFF, DXF, DWG, HP-GL, DWF, CGM) (git-ignored). Run with `cargo test --release -- --ignored --nocapture`.
 
 use std::time::Instant;
 
@@ -35,12 +35,14 @@ fn decode_samples() {
         let vector = |ext: &str| path.extension().is_some_and(|e| e.eq_ignore_ascii_case(ext));
         let hpgl = ["plt", "hpgl", "hpg", "hgl", "plo", "rtl"].iter().any(|e| vector(e));
         let dwf = vector("dwf") || vector("dwfx");
-        if vector("dxf") || vector("dwg") || hpgl || dwf {
+        if vector("dxf") || vector("dwg") || hpgl || dwf || vector("cgm") {
             let start = Instant::now();
             let decoded = if hpgl {
                 raster::hpgl::decode(&data, 0).map(|(d, _)| d)
             } else if dwf {
                 raster::dwf::decode(&data, 0).map(|(d, _)| d)
+            } else if vector("cgm") {
+                raster::cgm::decode(&data, 0).map(|(d, _)| d)
             } else if vector("dwg") {
                 raster::dwg::decode(&data)
             } else {
