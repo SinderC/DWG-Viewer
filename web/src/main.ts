@@ -594,7 +594,7 @@ const shortcuts: Shortcut[] = [
   { keys: ['Mod+f'], label: 'Find text', run: () => toggleFind(true), when: () => !findButton.hidden, button: 'find' },
   { keys: ['m'], label: 'Measure distance', run: () => setMeasuring(!measure.on), button: 'measure' },
   { keys: ['Escape'], label: 'Stop measuring', run: () => setMeasuring(false), when: () => measure.on },
-  { keys: ['?'], label: 'Keyboard shortcuts', run: () => keysDialog.showModal(), when: always },
+  { keys: ['?'], label: 'Keyboard shortcuts', run: () => keysDialog.showModal(), when: always, button: 'keys' },
 ];
 
 const KEY_NAMES: Record<string, string> = { Escape: 'Esc', ArrowLeft: '←', ArrowRight: '→', PageUp: 'Page Up', PageDown: 'Page Down' };
@@ -615,6 +615,7 @@ $('keys-body').replaceChildren(
     }),
   ),
 );
+for (const id of ['keys', 'start-keys']) $(id).addEventListener('click', () => keysDialog.showModal());
 for (const s of shortcuts) {
   const button = s.button && document.getElementById(s.button);
   if (button) button.title += ` (${keyName(s.keys[0])})`;
