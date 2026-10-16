@@ -16,7 +16,8 @@ export class Minimap {
   private stale = true;
   /** Drawing units per minimap device pixel. */
   private unit = 1;
-  private dragging = false;
+  /** The drag in progress: offset from the pointer to the view centre, in drawing units, and whether to spring. */
+  private grab: { dx: number; dy: number; animate: boolean } | null = null;
 
   constructor(
     private readonly el: HTMLElement,
@@ -26,14 +27,17 @@ export class Minimap {
     this.ctx = canvas.getContext('2d')!;
     canvas.addEventListener('pointerdown', (e) => {
       canvas.setPointerCapture(e.pointerId);
-      this.dragging = true;
-      this.moveTo(e, true);
+      // The outline drags from where it was grabbed; elsewhere, the view springs there and keeps following.
+      const p = this.point(e);
+      const { scale, x, y } = this.viewer.currentView;
+      const [w, h] = this.viewer.size.map((n) => n / scale);
+      const inside = p.x >= x && p.x <= x + w && p.y >= y && p.y <= y + h;
+      this.grab = inside ? { dx: x + w / 2 - p.x, dy: y + h / 2 - p.y, animate: false } : { dx: 0, dy: 0, animate: true };
+      this.moveTo(e);
     });
-    canvas.addEventListener('pointermove', (e) => {
-      if (this.dragging) this.moveTo(e, false);
-    });
-    canvas.addEventListener('pointerup', () => (this.dragging = false));
-    canvas.addEventListener('pointercancel', () => (this.dragging = false));
+    canvas.addEventListener('pointermove', (e) => this.moveTo(e));
+    canvas.addEventListener('pointerup', () => (this.grab = null));
+    canvas.addEventListener('pointercancel', () => (this.grab = null));
   }
 
   /** The drawing itself changed (document, page, layers or inversion). */
@@ -85,9 +89,16 @@ export class Minimap {
     this.stale = false;
   }
 
-  private moveTo(e: PointerEvent, animate: boolean): void {
+  /** The drawing point under the pointer. */
+  private point(e: PointerEvent): { x: number; y: number } {
     const rect = this.canvas.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
-    this.viewer.centreOn((e.clientX - rect.left) * dpr * this.unit, (e.clientY - rect.top) * dpr * this.unit, animate);
+    return { x: (e.clientX - rect.left) * dpr * this.unit, y: (e.clientY - rect.top) * dpr * this.unit };
+  }
+
+  private moveTo(e: PointerEvent): void {
+    if (!this.grab) return;
+    const p = this.point(e);
+    this.viewer.centreOn(p.x + this.grab.dx, p.y + this.grab.dy, this.grab.animate);
   }
 }

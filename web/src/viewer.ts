@@ -16,8 +16,11 @@ const DECELERATION = 0.998;
 const MIN_FLICK = 60;
 /** Pointer samples older than this are ignored when measuring release velocity. */
 const VELOCITY_WINDOW = 100;
-/** A press that moves less than this, in CSS pixels, is a tap rather than a drag. */
+/** A press that moves less than this, in CSS pixels, is a tap rather than a drag; fingers need more room. */
 const TAP_SLOP = 4;
+const TOUCH_TAP_SLOP = 10;
+/** Apple's rubber-band constant: how strongly a pull past the limits is resisted. */
+const RUBBER = 0.55;
 /** Frames slower than this make view changes jump instead of animate. */
 const SLOW_FRAME_MS = 25;
 
@@ -29,7 +32,28 @@ type Motion = (dt: number) => boolean;
 /** Draws on the transparent overlay canvas, in device pixels; it has been cleared. */
 export type OverlayPainter = (ctx: CanvasRenderingContext2D, view: View) => void;
 
-/** Canvas viewer: mouse wheel zooms around the cursor, left-drag pans (with momentum), double-click fits. */
+/**
+ * Past [lo, hi], `value` follows ever less, never more than `dim` beyond the edge, like a rubber band.
+ * `inverse` undoes it: from where the value is shown to where it was pulled.
+ */
+function rubberband(value: number, [lo, hi]: [number, number], dim: number, inverse: boolean): number {
+  const edge = Math.min(hi, Math.max(lo, value));
+  const over = Math.abs(value - edge);
+  if (!over) return value;
+  const shown = Math.min(over, dim * 0.99);
+  const moved = inverse ? (shown * dim) / (RUBBER * (dim - shown)) : (over * dim * RUBBER) / (dim + RUBBER * over);
+  return edge + Math.sign(value - edge) * moved;
+}
+
+/** `view` at scale `next`, keeping the drawing point under device pixel (px, py) fixed. */
+function zoomedAt({ scale, x, y }: View, next: number, px: number, py: number): View {
+  return { scale: next, x: x + px / scale - px / next, y: y + py / scale - py / next };
+}
+
+/**
+ * Canvas viewer: the mouse wheel and pinches zoom around the pointer; dragging and trackpad scrolling
+ * pan. Drags and pinches may pull past the limits (see `limits`), and spring back on release.
+ */
 export class Viewer {
   /** Called for a click or tap that did not pan. */
   onTap: ((e: PointerEvent) => void) | null = null;
@@ -42,7 +66,9 @@ export class Viewer {
   /** Finger distance and midpoint of a two-finger pinch in progress, in CSS pixels. */
   private pinch: { distance: number; x: number; y: number } | null = null;
   /** Where the press in progress started, to tell taps from drags. */
-  private press: { x: number; y: number; moved: boolean } | null = null;
+  private press: { x: number; y: number; slop: number; moved: boolean } | null = null;
+  /** Where the pointers hold the view, ignoring the limits; the view shown is this rubber-banded. */
+  private held: View | null = null;
   private doc: DrawingDocument | null = null;
   private view: View = { scale: 1, x: 0, y: 0 };
   /** Recent pointer positions of the drag in progress, in CSS pixels, newest last. */
@@ -72,7 +98,6 @@ export class Viewer {
     canvas.addEventListener('pointermove', (e) => this.onPointerMove(e));
     canvas.addEventListener('pointerup', (e) => this.onPointerUp(e));
     canvas.addEventListener('pointercancel', (e) => this.onPointerUp(e, true));
-    canvas.addEventListener('dblclick', () => this.fit());
   }
 
   setDocument(doc: DrawingDocument | null): void {
@@ -123,11 +148,74 @@ export class Viewer {
    */
   private zoomAt(factor: number, px: number, py: number, animate = false): void {
     if (!this.doc) return;
-    const { scale, x, y } = animate ? this.target() : this.view;
-    const max = this.doc.kind === 'raster' ? MAX_SCALE : this.fitScale() * MAX_VECTOR_ZOOM;
-    const next = Math.min(max, Math.max(this.fitScale() / 4, scale * factor));
-    const view = { scale: next, x: x + px / scale - px / next, y: y + py / scale - py / next };
-    this.go(view, animate);
+    const view = animate ? this.target() : this.view;
+    const next = Math.min(this.maxScale(), Math.max(this.fitScale() / 4, view.scale * factor));
+    this.go(zoomedAt(view, next, px, py), animate);
+  }
+
+  private maxScale(): number {
+    return this.doc?.kind === 'raster' ? MAX_SCALE : this.fitScale() * MAX_VECTOR_ZOOM;
+  }
+
+  private scaleLimits(): [number, number] {
+    return [Math.log(this.fitScale() / 4), Math.log(this.maxScale())];
+  }
+
+  /**
+   * Range of the drawing point at the canvas centre (see `params`), at `scale`. A drawing that fits the
+   * canvas stays centred below the toolbar, as fitted; a larger one may bring its edges in, clear of the
+   * floating chrome, by up to a quarter of the canvas.
+   */
+  private centreLimits(scale: number): [number, number][] {
+    const { width, height } = this.doc!;
+    const top = FIT_TOP * (window.devicePixelRatio || 1);
+    const range = (size: number, visible: number, mid: number): [number, number] => {
+      const margin = Math.min(visible / 4, Math.max(0, size - visible) / 2);
+      return [Math.min(mid, visible / 2 - margin), Math.max(mid, size - visible / 2 + margin)];
+    };
+    const w = this.canvas.width / scale;
+    const h = this.canvas.height / scale;
+    return [range(width, w, width / 2), range(height, h, height / 2 - top / (2 * scale))];
+  }
+
+  /** `view` brought within the limits. */
+  private clamp(view: View): View {
+    if (!this.doc) return view;
+    const within = (v: number, [lo, hi]: [number, number]) => Math.min(hi, Math.max(lo, v));
+    const [logScale, cx, cy] = this.params(view);
+    const clamped = within(logScale, this.scaleLimits());
+    const [xs, ys] = this.centreLimits(Math.exp(clamped));
+    return this.fromParams([clamped, within(cx, xs), within(cy, ys)]);
+  }
+
+  private inBounds(view: View): boolean {
+    if (!this.doc) return true;
+    const limits = [this.scaleLimits(), ...this.centreLimits(view.scale)];
+    return this.params(view).every((v, i) => v >= limits[i][0] - 1e-6 && v <= limits[i][1] + 1e-6);
+  }
+
+  /**
+   * The view shown for one held past the limits: zoom resists beyond doubling, panning beyond a canvas
+   * width or height. `inverse` turns a view on screen back into where it is held.
+   */
+  private band(view: View, inverse = false): View {
+    if (!this.doc) return view;
+    const p = this.params(view);
+    p[0] = rubberband(p[0], this.scaleLimits(), Math.LN2, inverse);
+    const shown = inverse ? view.scale : Math.exp(p[0]);
+    const [xs, ys] = this.centreLimits(shown);
+    p[1] = rubberband(p[1], xs, this.canvas.width / shown, inverse);
+    p[2] = rubberband(p[2], ys, this.canvas.height / shown, inverse);
+    return this.fromParams(p);
+  }
+
+  /** Springs back within the limits, carrying a flick's velocity (CSS pixels per second) into the bounce. */
+  private settle(vx = 0, vy = 0): void {
+    this.animateTo(this.clamp(this.view));
+    if (!this.springs) return;
+    const dpr = window.devicePixelRatio || 1;
+    this.springs[1].velocity = (-vx * dpr) / this.view.scale;
+    this.springs[2].velocity = (-vy * dpr) / this.view.scale;
   }
 
   private fitScale(): number {
@@ -147,11 +235,11 @@ export class Viewer {
     return { scale, x: (this.doc.width - w / scale) / 2, y: this.doc.height / 2 - (h + top) / (2 * scale) };
   }
 
-  /** Shows `view`, springing to it or jumping there (which stops any animation in progress). */
+  /** Shows `view` within the limits, springing to it or jumping there (which stops any animation in progress). */
   private go(view: View, animate: boolean): void {
-    if (animate) return this.animateTo(view);
+    if (animate) return this.animateTo(this.clamp(view));
     this.stop();
-    this.setView(view);
+    this.setView(this.clamp(view));
   }
 
   /** Animation parameters of a view: log scale (so zoom feels even), then the drawing point at the canvas centre. */
@@ -243,11 +331,11 @@ export class Viewer {
   /** Springs to a view centred on the box (x, y, w, h), zoomed so it spans about a third of the canvas. */
   showRegion(x: number, y: number, w: number, h: number): void {
     if (!this.doc) return;
-    const max = this.doc.kind === 'raster' ? MAX_SCALE : this.fitScale() * MAX_VECTOR_ZOOM;
+    const max = this.maxScale();
     const wanted = Math.min(this.canvas.width / (3 * w), this.canvas.height / (6 * h));
     const scale = Math.min(max, Math.max(this.fitScale(), wanted));
     const [cx, cy] = this.centre();
-    this.animateTo({ scale, x: x + w / 2 - cx / scale, y: y + h / 2 - cy / scale });
+    this.go({ scale, x: x + w / 2 - cx / scale, y: y + h / 2 - cy / scale }, true);
   }
 
   /** Moves the drawing point (x, y) to the centre of the canvas, keeping the scale. */
@@ -268,7 +356,9 @@ export class Viewer {
     if (this.motion) {
       const dt = Math.min(0.05, Math.max(0, (now - this.lastTick) / 1000));
       this.lastTick = now;
-      if (!this.motion(dt)) this.motion = null;
+      const motion = this.motion;
+      // A motion may hand over to another (momentum to a bounce), which then keeps running.
+      if (!motion(dt) && this.motion === motion) this.motion = null;
     }
     const { width, height } = this.canvas;
     if (this.docDirty) {
@@ -314,9 +404,20 @@ export class Viewer {
     return [(e.clientX - rect.left) * dpr, (e.clientY - rect.top) * dpr];
   }
 
+  /** A trackpad pans with two fingers and zooms with a pinch; a mouse wheel zooms. */
   private onWheel(e: WheelEvent): void {
     e.preventDefault();
-    const pixels = e.deltaMode === WheelEvent.DOM_DELTA_LINE ? e.deltaY * 16 : e.deltaY;
+    const line = e.deltaMode === WheelEvent.DOM_DELTA_LINE;
+    // Firefox scrolls a mouse wheel by lines. Chrome and Safari report a trackpad's legacy wheelDelta as
+    // exactly -3 × its deltaY, and a mouse notch differently; mice rarely scroll sideways.
+    const legacy = (e as WheelEvent & { wheelDeltaY?: number }).wheelDeltaY;
+    const trackpad = !line && (e.deltaX !== 0 || legacy === undefined || Math.abs(legacy + 3 * e.deltaY) <= 3);
+    if (trackpad && !e.ctrlKey) {
+      const dpr = window.devicePixelRatio || 1;
+      const { scale, x, y } = this.view;
+      return this.go({ scale, x: x + (e.deltaX * dpr) / scale, y: y + (e.deltaY * dpr) / scale }, false);
+    }
+    const pixels = line ? e.deltaY * 16 : e.deltaY;
     // Trackpad pinch arrives as a wheel event with ctrlKey and small deltas.
     const factor = Math.exp(-pixels * (e.ctrlKey ? 0.01 : 0.002));
     this.zoomAt(factor, ...this.devicePoint(e));
@@ -337,7 +438,10 @@ export class Viewer {
     if (this.pointers.size > 2) return;
     this.canvas.classList.add('dragging');
     this.drag = [{ x: e.clientX, y: e.clientY, t: e.timeStamp }];
-    this.press = { x: e.clientX, y: e.clientY, moved: false };
+    const slop = e.pointerType === 'touch' ? TOUCH_TAP_SLOP : TAP_SLOP;
+    this.press = { x: e.clientX, y: e.clientY, slop, moved: false };
+    // Caught mid-bounce, the view is held from wherever the rubber band has it.
+    this.held = this.band(this.view, true);
   }
 
   private pinchState(): { distance: number; x: number; y: number } {
@@ -350,17 +454,18 @@ export class Viewer {
     this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (this.pinch) return this.onPinch();
     if (!this.drag) return;
-    if (this.press && Math.hypot(e.clientX - this.press.x, e.clientY - this.press.y) > TAP_SLOP) this.press.moved = true;
+    if (this.press && Math.hypot(e.clientX - this.press.x, e.clientY - this.press.y) > this.press.slop) this.press.moved = true;
     // Until it is clearly a drag, the drawing stays put so a tap lands where it was aimed.
     if (this.press && !this.press.moved) return;
     const dpr = window.devicePixelRatio || 1;
-    const { scale, x, y } = this.view;
+    const { scale, x, y } = this.held!;
     const last = this.drag[this.drag.length - 1];
     const dx = ((e.clientX - last.x) * dpr) / scale;
     const dy = ((e.clientY - last.y) * dpr) / scale;
     this.drag.push({ x: e.clientX, y: e.clientY, t: e.timeStamp });
     this.drag = this.drag.filter((p) => e.timeStamp - p.t <= VELOCITY_WINDOW);
-    this.setView({ scale, x: x - dx, y: y - dy });
+    this.held = { scale, x: x - dx, y: y - dy };
+    this.setView(this.band(this.held));
   }
 
   /** The drawing follows both fingers: it pans with their midpoint and scales with their distance. */
@@ -370,9 +475,11 @@ export class Viewer {
     this.pinch = now;
     const dpr = window.devicePixelRatio || 1;
     const rect = this.canvas.getBoundingClientRect();
-    const { scale, x, y } = this.view;
-    this.view = { scale, x: x - ((now.x - before.x) * dpr) / scale, y: y - ((now.y - before.y) * dpr) / scale };
-    this.zoomAt(now.distance / Math.max(1, before.distance), (now.x - rect.left) * dpr, (now.y - rect.top) * dpr);
+    const { scale, x, y } = this.held!;
+    const panned = { scale, x: x - ((now.x - before.x) * dpr) / scale, y: y - ((now.y - before.y) * dpr) / scale };
+    const next = scale * (now.distance / Math.max(1, before.distance));
+    this.held = zoomedAt(panned, next, (now.x - rect.left) * dpr, (now.y - rect.top) * dpr);
+    this.setView(this.band(this.held));
   }
 
   private onPointerUp(e: PointerEvent, cancelled = false): void {
@@ -388,15 +495,19 @@ export class Viewer {
     if (this.pointers.size === 0) this.endDrag(cancelled ? undefined : e);
   }
 
-  /** On release, the drawing keeps the finger's velocity and decelerates like a scroll view. */
+  /**
+   * On release, a view pulled past the limits springs back; otherwise the drawing keeps the finger's
+   * velocity and decelerates like a scroll view, bouncing if it reaches the limits.
+   */
   private endDrag(e?: PointerEvent): void {
     const samples = this.drag?.filter((p) => !e || e.timeStamp - p.t <= VELOCITY_WINDOW);
     const tap = e && this.press && !this.press.moved;
-    this.drag = null;
-    this.press = null;
+    this.drag = this.press = this.held = null;
     this.canvas.classList.remove('dragging');
+    const out = !this.inBounds(this.view);
+    if (out) this.settle();
     if (tap) return this.onTap?.(e);
-    if (!e || !samples || samples.length < 2 || reducedMotion.matches) return;
+    if (out || !e || !samples || samples.length < 2 || reducedMotion.matches) return;
     const first = samples[0];
     const last = samples[samples.length - 1];
     const seconds = (last.t - first.t) / 1000;
@@ -408,6 +519,10 @@ export class Viewer {
       const dpr = window.devicePixelRatio || 1;
       const { scale, x, y } = this.view;
       this.setView({ scale, x: x - (vx * dt * dpr) / scale, y: y - (vy * dt * dpr) / scale });
+      if (!this.inBounds(this.view)) {
+        this.settle(vx, vy);
+        return false;
+      }
       const decay = DECELERATION ** (dt * 1000);
       vx *= decay;
       vy *= decay;

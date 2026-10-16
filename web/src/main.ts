@@ -345,8 +345,9 @@ function toggleLayersPanel(open = !layersPanel.classList.contains('open')): void
   layersButton.setAttribute('aria-pressed', String(open));
 }
 
+/** Errors stay until clicked, or until the next message or file replaces them. */
 function showError(name: string, err: unknown): void {
-  toast(`${name}: ${err instanceof Error ? err.message : String(err)}`, { error: true, ms: 8000 });
+  toast(`${name}: ${err instanceof Error ? err.message : String(err)}`, { error: true, ms: 0 });
 }
 
 /** Shows page `page` of `file`; on failure the current document stays on screen. */
@@ -374,6 +375,7 @@ function showPage(file: OpenFile, page: number): void {
     viewer.setDocument(doc);
     minimap.invalidate();
     if (findBar.classList.contains('open')) runFind();
+    updateToolbarEdges();
   } catch (err) {
     showError(file.name, err);
   }
@@ -441,6 +443,10 @@ viewer.onTap = (e) => {
   viewer.redrawOverlay();
 };
 measureButton.addEventListener('click', () => setMeasuring(!measure.on));
+// While measuring, a double click is two points, not a request to fit.
+canvas.addEventListener('dblclick', () => {
+  if (!measure.on) viewer.fit();
+});
 
 /** Saves the view as shown, measurements included, as a PNG next to the file's name. */
 function exportView(): void {
@@ -541,6 +547,17 @@ weightMenu.addEventListener('beforetoggle', (e) => {
   weightMenu.style.top = `${rect.bottom + 8}px`;
   weightMenu.style.left = `${rect.left + rect.width / 2}px`;
 });
+// Focus starts on the checked width; the arrow keys move between widths.
+weightMenu.addEventListener('toggle', (e) => {
+  if ((e as ToggleEvent).newState === 'open') weightItems.find((item) => item.getAttribute('aria-checked') === 'true')?.focus();
+});
+weightMenu.addEventListener('keydown', (e) => {
+  const step = e.key === 'ArrowDown' ? 1 : e.key === 'ArrowUp' ? -1 : 0;
+  if (!step) return;
+  e.preventDefault();
+  const i = weightItems.indexOf(document.activeElement as HTMLButtonElement);
+  weightItems[(i + step + weightItems.length) % weightItems.length].focus();
+});
 
 const toggleInvert = () => {
   invert.setAttribute('aria-pressed', String(viewer.toggleInvert()));
@@ -616,16 +633,37 @@ document.addEventListener('keydown', (e) => {
   shortcut.run();
 });
 
-document.addEventListener('dragover', (e) => {
-  e.preventDefault();
+/** Elements the drag is over: each one entered is left again, so the page is left when this reaches 0. */
+let dragDepth = 0;
+document.addEventListener('dragenter', () => {
+  dragDepth++;
   document.body.classList.add('drop');
 });
-document.addEventListener('dragleave', (e) => {
-  if (!e.relatedTarget) document.body.classList.remove('drop');
+document.addEventListener('dragover', (e) => e.preventDefault());
+document.addEventListener('dragleave', () => {
+  if (--dragDepth <= 0) {
+    dragDepth = 0;
+    document.body.classList.remove('drop');
+  }
 });
 document.addEventListener('drop', (e) => {
   e.preventDefault();
+  dragDepth = 0;
   document.body.classList.remove('drop');
   const file = e.dataTransfer?.files[0];
   if (file) openFile(file);
 });
+
+const toolbar = $('toolbar');
+
+/** Fades the toolbar's edges where more buttons are scrolled out of view. */
+function updateToolbarEdges(): void {
+  const { scrollLeft, scrollWidth, clientWidth } = toolbar;
+  toolbar.classList.toggle('more-start', scrollLeft > 1);
+  toolbar.classList.toggle('more-end', scrollLeft + clientWidth < scrollWidth - 1);
+}
+toolbar.addEventListener('scroll', updateToolbarEdges, { passive: true });
+new ResizeObserver(updateToolbarEdges).observe(toolbar);
+
+// iOS Safari only shows :active press feedback once the page listens for touches.
+document.addEventListener('touchstart', () => {}, { passive: true });

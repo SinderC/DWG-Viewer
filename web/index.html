@@ -136,6 +136,12 @@
         white-space: nowrap;
         text-overflow: ellipsis;
       }
+      #toolbar.more-start { -webkit-mask-image: linear-gradient(to right, transparent, #000 32px); mask-image: linear-gradient(to right, transparent, #000 32px); }
+      #toolbar.more-end { -webkit-mask-image: linear-gradient(to left, transparent, #000 32px); mask-image: linear-gradient(to left, transparent, #000 32px); }
+      #toolbar.more-start.more-end {
+        -webkit-mask-image: linear-gradient(to right, transparent, #000 32px, #000 calc(100% - 32px), transparent);
+        mask-image: linear-gradient(to right, transparent, #000 32px, #000 calc(100% - 32px), transparent);
+      }
       #title:empty { display: none; }
       body:not(.has-doc) .doc, body:not(.has-doc) #toolbar { display: none; }
       #zoom, #page { min-width: 48px; color: var(--muted); font-variant-numeric: tabular-nums; text-align: center; }
@@ -322,7 +328,8 @@
         z-index: 3;
       }
       #toast.show { transform: translate(-50%, 0); opacity: 1; pointer-events: auto; }
-      #toast.error { color: var(--error); }
+      /* Errors wrap so all of the message can be read. */
+      #toast.error { width: max-content; max-width: min(560px, calc(100vw - 32px)); border-radius: 14px; color: var(--error); white-space: normal; text-align: center; overflow-wrap: anywhere; }
 
       /* Sheets materialize: scale and fade in, the page dims behind them. */
       dialog {
@@ -404,7 +411,7 @@
         <p>Open an engineering drawing, or drop it anywhere on this page.</p>
         <button class="primary" id="start-open">Open Drawing…</button>
         <ul id="formats" aria-label="Supported formats"></ul>
-        <p class="keys-hint">Drag to pan, scroll or pinch to zoom, double-click to fit. Press <kbd>?</kbd> for shortcuts.</p>
+        <p class="keys-hint">Drag or scroll to pan, pinch or use the mouse wheel to zoom, double-click to fit. Press <kbd>?</kbd> for shortcuts.</p>
         <footer>
           <span>Files are opened locally and never leave this computer.</span>
           <a href="https://github.com/SinderC/DWG-Viewer" target="_blank" rel="noopener" title="Source on GitHub" aria-label="Source on GitHub">
@@ -428,7 +435,7 @@
       </div>
       <div class="group doc">
         <button id="invert" title="Swap black and white" aria-label="Invert" aria-pressed="false"><svg class="icon"><use href="#i-invert" /></svg></button>
-        <button id="weight" title="Line width" aria-label="Line width" aria-pressed="false" popovertarget="weight-menu" hidden><svg class="icon"><use href="#i-weight" /></svg></button>
+        <button id="weight" title="Line width" aria-label="Line width" aria-pressed="false" popovertarget="weight-menu" aria-haspopup="menu" hidden><svg class="icon"><use href="#i-weight" /></svg></button>
         <button id="layers" title="Layers" aria-label="Layers" aria-pressed="false" hidden><svg class="icon"><use href="#i-layers" /></svg></button>
         <button id="find" title="Find text" aria-label="Find text" aria-pressed="false" hidden><svg class="icon"><use href="#i-search" /></svg></button>
         <button id="measure" title="Measure distance" aria-label="Measure" aria-pressed="false"><svg class="icon"><use href="#i-ruler" /></svg></button>
@@ -462,7 +469,7 @@
 
     <div id="minimap" class="glass"><canvas aria-label="Overview: click to move there"></canvas></div>
     <div id="coords" class="glass" hidden></div>
-    <div id="weight-menu" class="glass menu" popover role="group" aria-label="Line width"></div>
+    <div id="weight-menu" class="glass menu" popover role="menu" aria-label="Line width"></div>
     <div id="toast" class="glass" role="status" aria-live="polite"></div>
 
     <dialog id="info-dialog" class="glass" aria-labelledby="info-title">
