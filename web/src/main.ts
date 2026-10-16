@@ -540,11 +540,11 @@ function cycleLineScale(): void {
   setLineScale(LINE_SCALES[(i + 1) % LINE_SCALES.length].scale);
 }
 
-// Hang the menu under its button, centred on it.
+// Stand the menu on its button, centred on it.
 weightMenu.addEventListener('beforetoggle', (e) => {
   if ((e as ToggleEvent).newState !== 'open') return;
   const rect = weightButton.getBoundingClientRect();
-  weightMenu.style.top = `${rect.bottom + 8}px`;
+  weightMenu.style.bottom = `${window.innerHeight - rect.top + 8}px`;
   weightMenu.style.left = `${rect.left + rect.width / 2}px`;
 });
 // Focus starts on the checked width; the arrow keys move between widths.

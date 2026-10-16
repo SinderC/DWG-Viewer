@@ -9,7 +9,7 @@ const MAX_VECTOR_ZOOM = 1000;
 const VECTOR_FIT = 0.95;
 const ZOOM_STEP = 1.5;
 /** Space kept clear for the floating toolbar when fitting, in CSS pixels. */
-const FIT_TOP = 60;
+const FIT_BOTTOM = 60;
 /** Scroll-like deceleration per millisecond after a flick (Apple's normal rate). */
 const DECELERATION = 0.998;
 /** Flicks slower than this, in CSS pixels per second, just stop. */
@@ -163,19 +163,19 @@ export class Viewer {
 
   /**
    * Range of the drawing point at the canvas centre (see `params`), at `scale`. A drawing that fits the
-   * canvas stays centred below the toolbar, as fitted; a larger one may bring its edges in, clear of the
+   * canvas stays centred above the toolbar, as fitted; a larger one may bring its edges in, clear of the
    * floating chrome, by up to a quarter of the canvas.
    */
   private centreLimits(scale: number): [number, number][] {
     const { width, height } = this.doc!;
-    const top = FIT_TOP * (window.devicePixelRatio || 1);
+    const bottom = FIT_BOTTOM * (window.devicePixelRatio || 1);
     const range = (size: number, visible: number, mid: number): [number, number] => {
       const margin = Math.min(visible / 4, Math.max(0, size - visible) / 2);
       return [Math.min(mid, visible / 2 - margin), Math.max(mid, size - visible / 2 + margin)];
     };
     const w = this.canvas.width / scale;
     const h = this.canvas.height / scale;
-    return [range(width, w, width / 2), range(height, h, height / 2 - top / (2 * scale))];
+    return [range(width, w, width / 2), range(height, h, height / 2 + bottom / (2 * scale))];
   }
 
   /** `view` brought within the limits. */
@@ -221,18 +221,18 @@ export class Viewer {
   private fitScale(): number {
     if (!this.doc) return 1;
     const fill = this.doc.kind === 'vector' ? VECTOR_FIT : 1;
-    const top = FIT_TOP * (window.devicePixelRatio || 1);
-    const height = Math.max(1, this.canvas.height - top);
+    const bottom = FIT_BOTTOM * (window.devicePixelRatio || 1);
+    const height = Math.max(1, this.canvas.height - bottom);
     return fill * Math.min(this.canvas.width / this.doc.width, height / this.doc.height);
   }
 
-  /** The whole drawing, centred in the canvas area below the toolbar. */
+  /** The whole drawing, centred in the canvas area above the toolbar. */
   private fitView(): View {
     if (!this.doc) return this.view;
     const scale = this.fitScale();
     const { width: w, height: h } = this.canvas;
-    const top = FIT_TOP * (window.devicePixelRatio || 1);
-    return { scale, x: (this.doc.width - w / scale) / 2, y: this.doc.height / 2 - (h + top) / (2 * scale) };
+    const bottom = FIT_BOTTOM * (window.devicePixelRatio || 1);
+    return { scale, x: (this.doc.width - w / scale) / 2, y: this.doc.height / 2 - (h - bottom) / (2 * scale) };
   }
 
   /** Shows `view` within the limits, springing to it or jumping there (which stops any animation in progress). */
