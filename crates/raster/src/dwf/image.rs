@@ -10,7 +10,7 @@ use crate::rgba::{rgb, RgbaImage, MAX_PIXELS};
 use crate::tiff::Image;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) enum Kind {
+pub(crate) enum Kind {
     /// One byte per pixel into the stream's colour map.
     Indexed,
     /// One byte per pixel into the image's own colour map.
@@ -26,7 +26,7 @@ pub(super) enum Kind {
 }
 
 /// Decodes `data`; `map` holds 0xRRGGBB colours for the mapped kinds.
-pub(super) fn decode(kind: Kind, width: u32, height: u32, map: &[u32], data: &[u8]) -> Result<Image, String> {
+pub(crate) fn decode(kind: Kind, width: u32, height: u32, map: &[u32], data: &[u8]) -> Result<Image, String> {
     let short = || "image data is truncated".to_string();
     let lookup = |i: u8| map.get(i as usize).copied().unwrap_or(0);
     let raw = |bytes_per_pixel: usize| -> Result<&[u8], String> {
