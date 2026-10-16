@@ -1,4 +1,4 @@
-# Drawing Viewer
+# Open Drawing Viewer
 
 Offline, browser-only viewer for engineering drawings (CALS raster, TIFF, DXF, DWG). Rust decodes and
 renders to WASM; a small TypeScript front end draws to a canvas. The build is one self-contained HTML file.

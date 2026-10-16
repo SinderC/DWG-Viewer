@@ -9,7 +9,7 @@ import { Minimap } from './minimap';
 import { Viewer } from './viewer';
 
 // HP-GL has no signature, so its loose sniff goes last.
-const plugins: FormatPlugin[] = [cals, tiff, dxf, dwg, dwf, cgm, hpgl];
+const plugins: FormatPlugin[] = [dxf, dwg, dwf, cals, tiff, cgm, hpgl];
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const fileInput = $<HTMLInputElement>('file');
@@ -358,7 +358,7 @@ function showPage(file: OpenFile, page: number): void {
     const doc = file.plugin.open(file.bytes, page);
     current = { ...file, page, pageCount: doc.pageCount, info: fileInfo(file, doc, page), formatInfo: doc.info, doc };
     title.textContent = title.title = file.name;
-    document.title = `${file.name} – Drawing Viewer`;
+    document.title = `${file.name} – Open Drawing Viewer`;
     hideToast();
     pager.hidden = doc.pageCount < 2;
     actualSize.hidden = doc.kind !== 'raster';
