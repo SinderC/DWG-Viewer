@@ -176,16 +176,25 @@ function texts(doc: DxfDoc): Text[] {
   const data = doc.texts();
   const colors = doc.textColors();
   const layers = doc.textLayers();
+  const fits = doc.textFits();
+  const measure = document.createElement('canvas').getContext('2d')!;
+  measure.font = `${100 * EM_PER_CAP}px sans-serif`;
   return doc.textStrings().map((string, i) => {
     const [x, y, ax, ay, ux, uy, halign, valign] = data.subarray(8 * i, 8 * i + 8);
-    const height = Math.hypot(ux, uy);
     const lines = string.split('\n');
     const longest = Math.max(...lines.map((l) => l.length));
+    // Text with a fit width shrinks to it: measured at a height of 100, the drawn width is that per 100 × |x|.
+    const cap = Math.hypot(ux, uy);
+    let height = cap;
+    if (fits[i] > 0) {
+      const wide = Math.max(...lines.map((l) => measure.measureText(l).width)) / 100;
+      height *= Math.min(1, fits[i] / (wide * Math.hypot(ax, ay)));
+    }
     return {
       x,
       y,
       // Glyph y points down, opposite to `up`.
-      matrix: [ax / height, ay / height, -ux / height, -uy / height],
+      matrix: [ax / cap, ay / cap, -ux / cap, -uy / cap],
       height,
       reach: (Math.hypot(ax, ay) * longest + height * lines.length * LINE_SPACING) * EM_PER_CAP,
       align: ALIGN[halign],
@@ -234,6 +243,8 @@ export function vectorDocument(doc: DxfDoc): VectorDocument {
     const paths = strokes(doc);
     const labels = texts(doc);
     const layerList = layers(doc);
+    const page = doc.background();
+    const pageColor = doc.backgroundColor;
     return {
       kind: 'vector',
       width: doc.width,
@@ -250,6 +261,11 @@ export function vectorDocument(doc: DxfDoc): VectorDocument {
         ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx.fillStyle = invert ? '#000' : '#fff';
         ctx.fillRect(0, 0, width, height);
+        // The page goes under everything, images included.
+        if (page.length === 4) {
+          ctx.fillStyle = css(pageColor, invert);
+          ctx.fillRect((page[0] - x) * scale, (page[1] - y) * scale, page[2] * scale, page[3] * scale);
+        }
         for (const image of pictures) {
           if (layerList[image.layer].visible) drawImage(ctx, image, view, invert);
         }

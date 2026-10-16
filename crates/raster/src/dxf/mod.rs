@@ -64,6 +64,8 @@ pub struct Text {
     pub color: u32,
     /// Index into `Drawing::layers`.
     pub layer: u32,
+    /// Width the text is shrunk to fit if wider, in drawing units; 0 for none.
+    pub fit: f64,
 }
 
 /// A filled area: the rings are subpaths of one shape, filled with the even-odd or non-zero rule.
@@ -96,10 +98,19 @@ pub struct Drawing {
     pub texts: Vec<Text>,
     pub fills: Vec<Fill>,
     pub images: Vec<PlacedImage>,
+    /// The page, if the format has one, painted before everything else.
+    pub background: Option<Background>,
     /// Layers in name order, with their visibility as saved in the file.
     pub layers: Vec<Layer>,
     /// File properties as (label, value) rows for display.
     pub info: Vec<(String, String)>,
+}
+
+/// A page: top-left corner, width and height, and colour.
+pub struct Background {
+    pub pos: P,
+    pub size: P,
+    pub color: u32,
 }
 
 /// Colour, layer and line width (in drawing units, 0 = hairline) of a shape.
@@ -200,6 +211,8 @@ pub(crate) struct World<'a> {
     texts: Vec<Text>,
     fills: Vec<Fill>,
     images: Vec<PlacedImage>,
+    /// Page corners (world coordinates) and colour.
+    page: Option<(P, P, u32)>,
     /// Entity types that are not drawn, with how often they occur (block contents once per insert).
     skipped: BTreeMap<&'a str, usize>,
     layers: Vec<Layer>,
@@ -214,7 +227,7 @@ impl<'a> World<'a> {
         layers.dedup_by(|a, b| a.name.to_uppercase() == b.name.to_uppercase());
         let layer_ids = layers.iter().enumerate().map(|(i, l)| (l.name.to_uppercase(), i as u32)).collect();
         let (paths, arcs, texts, fills, images, skipped) = Default::default();
-        World { paths, arcs, texts, fills, images, skipped, layers, layer_ids }
+        World { paths, arcs, texts, fills, images, page: None, skipped, layers, layer_ids }
     }
 
     fn layer_id(&mut self, name: &str) -> u32 {
@@ -231,6 +244,11 @@ impl<'a> World<'a> {
         self.layers.push(Layer { name: name.to_string(), color, visible: true });
         self.layer_ids.insert(key, id);
         id
+    }
+
+    /// Sets the page: opposite corners in world coordinates and its colour. It is always part of the extents.
+    pub(crate) fn page(&mut self, a: P, b: P, color: u32) {
+        self.page = Some((a, b, color));
     }
 
     pub(crate) fn skip(&mut self, kind: &'a str) {
@@ -302,14 +320,18 @@ impl<'a> World<'a> {
             return;
         }
         let (s, c) = rotation.sin_cos();
-        self.text_frame(pos, [c * height * width, s * height * width], [-s * height, c * height], (halign, valign), text, m, pen);
+        self.text_frame(pos, [c * height * width, s * height * width], [-s * height, c * height], (halign, valign), text, 0.0, m, pen);
     }
 
     /// Text in glyph space spanned by `x` and `up` (see [`Text`]), which need not be perpendicular.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn text_frame(&mut self, pos: P, x: P, up: P, (halign, valign): (u8, u8), text: String, m: &Affine, pen: Pen) {
+    /// `fit` is the width, along `x`, the text must fit in (0 for none).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn text_frame(&mut self, pos: P, x: P, up: P, (halign, valign): (u8, u8), text: String, fit: f64, m: &Affine, pen: Pen) {
         if !text.trim().is_empty() {
-            self.texts.push(Text { pos: m.apply(pos), x: m.linear(x), up: m.linear(up), halign, valign, text, color: pen.color, layer: pen.layer });
+            let len = |v: P| v[0].hypot(v[1]);
+            let fit = if len(x) > 0.0 { fit * len(m.linear(x)) / len(x) } else { 0.0 };
+            self.texts.push(Text { pos: m.apply(pos), x: m.linear(x), up: m.linear(up), halign, valign, text, color: pen.color, layer: pen.layer, fit });
         }
     }
 
@@ -339,6 +361,11 @@ impl<'a> World<'a> {
             texts: self.texts.into_iter().map(|t| Text { pos: pt(t.pos), x: vec(t.x), up: vec(t.up), ..t }).collect(),
             fills: self.fills.into_iter().map(|f| Fill { rings: f.rings.into_iter().map(|r| r.into_iter().map(pt).collect()).collect(), ..f }).collect(),
             images: self.images.into_iter().map(|i| PlacedImage { pos: pt(i.pos), ..i }).collect(),
+            background: self.page.map(|(a, b, color)| Background {
+                pos: pt([a[0].min(b[0]), a[1].max(b[1])]),
+                size: [(a[0] - b[0]).abs(), (a[1] - b[1]).abs()],
+                color,
+            }),
             layers: self.layers,
             info,
         })
@@ -363,6 +390,10 @@ impl<'a> World<'a> {
             let (w, h) = i.image.size();
             grow(i.pos);
             grow([i.pos[0] + w as f64 * i.px, i.pos[1] - h as f64 * i.px]);
+        }
+        if let Some((a, b, _)) = self.page {
+            grow(a);
+            grow(b);
         }
         (min[0] <= max[0] && min[1] <= max[1]).then_some((min, max))
     }

@@ -134,7 +134,7 @@ impl DxfDoc {
         Ok(DxfDoc { drawing, pages })
     }
 
-    /// Opens picture `page` (0-based) of a binary CGM file.
+    /// Opens picture `page` (0-based) of a binary or clear-text CGM file.
     #[wasm_bindgen(js_name = openCgm)]
     pub fn open_cgm(data: &[u8], page: u32) -> Result<DxfDoc, JsError> {
         let (drawing, pages) = cgm::decode(data, page).map_err(|e| JsError::new(&e))?;
@@ -243,6 +243,16 @@ impl DxfDoc {
         self.drawing.fills.iter().map(|f| f.even_odd as u8).collect()
     }
 
+    /// The page as top-left x, y, width and height, or empty if there is none.
+    pub fn background(&self) -> Vec<f64> {
+        self.drawing.background.iter().flat_map(|b| [b.pos[0], b.pos[1], b.size[0], b.size[1]]).collect()
+    }
+
+    #[wasm_bindgen(getter, js_name = backgroundColor)]
+    pub fn background_color(&self) -> u32 {
+        self.drawing.background.as_ref().map_or(dxf::BACKGROUND, |b| b.color)
+    }
+
     /// Four numbers per image: top-left x, y, pixel size in drawing units, layer.
     #[wasm_bindgen(js_name = imagePlacements)]
     pub fn image_placements(&self) -> Vec<f64> {
@@ -276,6 +286,12 @@ impl DxfDoc {
     #[wasm_bindgen(js_name = textStrings)]
     pub fn text_strings(&self) -> Vec<String> {
         self.drawing.texts.iter().map(|t| t.text.clone()).collect()
+    }
+
+    /// Width each text is shrunk to fit if wider, in drawing units; 0 for none.
+    #[wasm_bindgen(js_name = textFits)]
+    pub fn text_fits(&self) -> Vec<f64> {
+        self.drawing.texts.iter().map(|t| t.fit).collect()
     }
 
     #[wasm_bindgen(js_name = textColors)]
