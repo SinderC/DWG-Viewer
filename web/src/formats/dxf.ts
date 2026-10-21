@@ -11,6 +11,8 @@ const DESCENT = 0.3;
 const EM_PER_CAP = 1 / 0.7;
 /** MTEXT default line spacing, in cap heights. */
 const LINE_SPACING = 5 / 3;
+/** Linetypes whose pattern repeats in fewer device pixels than this are drawn solid, as AutoCAD does. */
+const MIN_DASH_PX = 4;
 /** Text smaller than this many device pixels is not drawn. */
 const MIN_TEXT_PX = 1.5;
 /** Colours lighter (on white) or darker (on black) than this luma are adjusted to stay readable. */
@@ -46,6 +48,9 @@ interface Stroke {
   color: number;
   /** In drawing units; 0 is a hairline. */
   width: number;
+  /** Canvas dash pattern in drawing units, empty for solid; and its repeat length. */
+  dash: number[];
+  period: number;
   path: Path2D;
 }
 
@@ -82,25 +87,38 @@ function css(color: number, invert: boolean): string {
   return `rgb(${rgb.map(Math.round).join(' ')})`;
 }
 
-/** Builds one Path2D per layer, colour and width, so a frame is a handful of stroke() calls. */
+/** The dash patterns, by index; the first is solid. */
+function dashes(doc: DxfDoc): number[][] {
+  const lengths = doc.dashLengths();
+  let k = 0;
+  return Array.from(doc.dashCounts(), (n) => Array.from(lengths.subarray(k, (k += n))));
+}
+
+/** Builds one Path2D per layer, colour, width and dash pattern, so a frame is a handful of stroke() calls. */
 function strokes(doc: DxfDoc): Map<number, Map<string, Stroke>> {
+  const patterns = dashes(doc);
   const byLayer = new Map<number, Map<string, Stroke>>();
-  const pathFor = (layer: number, color: number, width: number) => {
+  const pathFor = (layer: number, color: number, width: number, dash: number) => {
     let byStyle = byLayer.get(layer);
     if (!byStyle) byLayer.set(layer, (byStyle = new Map()));
-    const key = `${color}/${width}`;
+    const key = `${color}/${width}/${dash}`;
     let stroke = byStyle.get(key);
-    if (!stroke) byStyle.set(key, (stroke = { color, width, path: new Path2D() }));
+    if (!stroke) {
+      const pattern = patterns[dash];
+      const period = pattern.reduce((a, b) => a + b, 0);
+      byStyle.set(key, (stroke = { color, width, dash: pattern, period, path: new Path2D() }));
+    }
     return stroke.path;
   };
 
   const points = doc.pathPoints();
   const colors = doc.pathColors();
   const widths = doc.pathWidths();
+  const pathDashes = doc.pathDashes();
   const layers = doc.pathLayers();
   let k = 0;
   doc.pathLengths().forEach((n, i) => {
-    const path = pathFor(layers[i], colors[i], widths[i]);
+    const path = pathFor(layers[i], colors[i], widths[i], pathDashes[i]);
     path.moveTo(points[k], points[k + 1]);
     for (let j = 1; j < n; j++) path.lineTo(points[k + 2 * j], points[k + 2 * j + 1]);
     k += 2 * n;
@@ -110,11 +128,12 @@ function strokes(doc: DxfDoc): Map<number, Map<string, Stroke>> {
   const arcs = doc.arcs();
   const arcLayers = doc.arcLayers();
   const arcWidths = doc.arcWidths();
+  const arcDashes = doc.arcDashes();
   doc.arcColors().forEach((color, i) => {
     const [cx, cy, ux, uy, vx, vy, t0, t1] = arcs.subarray(8 * i, 8 * i + 8);
     const unit = new Path2D();
     unit.ellipse(0, 0, 1, 1, 0, t0, t1, t1 < t0);
-    pathFor(arcLayers[i], color, arcWidths[i]).addPath(unit, new DOMMatrix([ux, uy, vx, vy, cx, cy]));
+    pathFor(arcLayers[i], color, arcWidths[i], arcDashes[i]).addPath(unit, new DOMMatrix([ux, uy, vx, vy, cx, cy]));
   });
   return byLayer;
 }
@@ -293,12 +312,14 @@ export function vectorDocument(doc: DxfDoc): VectorDocument {
         ctx.lineJoin = 'round';
         for (const [layer, byStyle] of paths) {
           if (!layerList[layer].visible) continue;
-          for (const { color, width: lineWidth, path } of byStyle.values()) {
+          for (const { color, width: lineWidth, dash, period, path } of byStyle.values()) {
             ctx.strokeStyle = css(color, invert);
             ctx.lineWidth = Math.max(lineWidth * this.lineScale, 1 / scale);
+            ctx.setLineDash(period * scale < MIN_DASH_PX ? [] : dash);
             ctx.stroke(path);
           }
         }
+        ctx.setLineDash([]);
 
         for (const t of labels) {
           const px = t.height * scale;

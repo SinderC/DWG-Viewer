@@ -312,7 +312,7 @@ impl Decoder {
         let n = self.st.pen;
         let color = self.st.colors[n];
         let layer = *self.pens.entry(n).or_insert_with(|| self.world.layer(&format!("Pen {n}"), color));
-        Pen { color, layer, width: self.st.widths[n] }
+        Pen { color, layer, width: self.st.widths[n], dash: 0 }
     }
 
     fn stroke(&mut self, points: Vec<P>) {

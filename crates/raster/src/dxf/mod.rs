@@ -32,6 +32,8 @@ pub struct Path {
     pub color: u32,
     /// Line width in drawing units; 0 is a hairline.
     pub width: f64,
+    /// Index into `Drawing::dashes`.
+    pub dash: u32,
     /// Index into `Drawing::layers`.
     pub layer: u32,
 }
@@ -46,6 +48,8 @@ pub struct Arc {
     pub color: u32,
     /// Line width in drawing units; 0 is a hairline.
     pub width: f64,
+    /// Index into `Drawing::dashes`.
+    pub dash: u32,
     /// Index into `Drawing::layers`.
     pub layer: u32,
 }
@@ -114,6 +118,9 @@ pub struct Drawing {
     pub texts: Vec<Text>,
     pub fills: Vec<Fill>,
     pub images: Vec<PlacedImage>,
+    /// Dash patterns of the paths and arcs, as alternating on and off lengths in drawing units;
+    /// the first, for solid lines, is empty.
+    pub dashes: Vec<Vec<f64>>,
     /// The page, if the format has one, painted before everything else.
     pub background: Option<Background>,
     /// Layers in name order, with their visibility as saved in the file.
@@ -129,12 +136,14 @@ pub struct Background {
     pub color: u32,
 }
 
-/// Colour, layer and line width (in drawing units, 0 = hairline) of a shape.
+/// Colour, layer, line width (in drawing units, 0 = hairline) and dash pattern (index into
+/// `Drawing::dashes`, 0 = solid) of a shape.
 #[derive(Clone, Copy)]
 pub(crate) struct Pen {
     pub color: u32,
     pub layer: u32,
     pub width: f64,
+    pub dash: u32,
 }
 
 /// Parses an ASCII DXF file and expands its model space.
@@ -145,6 +154,7 @@ pub fn decode(data: &[u8]) -> Result<Drawing, String> {
 
     let mut header: &[Pair] = &[];
     let mut layers = Vec::new();
+    let mut linetypes = Vec::new();
     let mut blocks = HashMap::new();
     let mut entities = Vec::new();
     let mut found_section = false;
@@ -161,7 +171,10 @@ pub fn decode(data: &[u8]) -> Result<Drawing, String> {
         match rec.get(2).map(str::trim) {
             // Header variables have no `0` groups, so they all sit in the SECTION record.
             Some("HEADER") => header = rec.pairs,
-            Some("TABLES") => layers.extend(body.iter().filter(|r| r.kind == "LAYER").map(layer)),
+            Some("TABLES") => {
+                layers.extend(body.iter().filter(|r| r.kind == "LAYER").map(layer));
+                linetypes.extend(body.iter().filter(|r| r.kind == "LTYPE").copied());
+            }
             Some("BLOCKS") => blocks = parse_blocks(body),
             Some("ENTITIES") => entities = group(body),
             _ => {}
@@ -179,6 +192,12 @@ pub fn decode(data: &[u8]) -> Result<Drawing, String> {
     info.extend(summary(units, &layers, blocks.keys().map(String::as_str), model_space));
 
     let mut b = Builder { blocks: &blocks, world: World::new(layers) };
+    let ltscale = header_var(header, "$LTSCALE").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+    // Complex linetypes (element type 74 non-zero: shapes or text in the gaps) are drawn solid.
+    for lt in linetypes.iter().filter(|r| r.pairs.iter().all(|p| p.code != 74 || p.value.trim() == "0")) {
+        let pattern = lt.pairs.iter().filter(|p| p.code == 49).map(|p| p.value.trim().parse().unwrap_or(0.0) * ltscale);
+        b.world.add_linetype(&lt.name(2), pattern);
+    }
     for e in &entities {
         b.entity(e, &Ctx::ROOT);
     }
@@ -234,6 +253,13 @@ pub(crate) struct World<'a> {
     layers: Vec<Layer>,
     /// Upper-case layer name → index in `layers`.
     layer_ids: HashMap<String, u32>,
+    /// Canvas dash patterns of the linetypes, at linetype scale 1; the first is solid.
+    linetypes: Vec<Vec<f64>>,
+    /// Upper-case linetype name → index in `linetypes`.
+    linetype_ids: HashMap<String, u32>,
+    /// Scaled patterns handed out as `Pen::dash`, and their (linetype, scale bits) → index.
+    dashes: Vec<Vec<f64>>,
+    dash_ids: HashMap<(u32, u64), u32>,
 }
 
 impl<'a> World<'a> {
@@ -242,8 +268,36 @@ impl<'a> World<'a> {
         layers.sort_by_cached_key(|l| l.name.to_uppercase());
         layers.dedup_by(|a, b| a.name.to_uppercase() == b.name.to_uppercase());
         let layer_ids = layers.iter().enumerate().map(|(i, l)| (l.name.to_uppercase(), i as u32)).collect();
-        let (paths, arcs, texts, fills, images, skipped) = Default::default();
-        World { paths, arcs, texts, fills, images, page: None, skipped, layers, layer_ids }
+        let (paths, arcs, texts, fills, images, skipped, linetype_ids, dash_ids) = Default::default();
+        let (linetypes, dashes) = (vec![Vec::new()], vec![Vec::new()]);
+        World { paths, arcs, texts, fills, images, page: None, skipped, layers, layer_ids, linetypes, linetype_ids, dashes, dash_ids }
+    }
+
+    /// Adds linetype `name` with its AutoCAD pattern: dashes positive, gaps negative, dots 0.
+    pub(crate) fn add_linetype(&mut self, name: &str, pattern: impl IntoIterator<Item = f64>) {
+        let dash = canvas_dash(pattern);
+        if !dash.is_empty() {
+            self.linetype_ids.insert(name.trim().to_uppercase(), self.linetypes.len() as u32);
+            self.linetypes.push(dash);
+        }
+    }
+
+    /// Index of linetype `name`, or 0 (solid) if it is continuous or not known.
+    fn linetype_id(&self, name: &str) -> u32 {
+        self.linetype_ids.get(&name.trim().to_uppercase()).copied().unwrap_or(0)
+    }
+
+    /// `Pen::dash` for `linetype` scaled by `scale`.
+    fn dash(&mut self, linetype: u32, scale: f64) -> u32 {
+        if linetype == 0 || !(scale > 0.0) {
+            return 0;
+        }
+        let next = self.dashes.len() as u32;
+        let id = *self.dash_ids.entry((linetype, scale.to_bits())).or_insert(next);
+        if id == next {
+            self.dashes.push(self.linetypes[linetype as usize].iter().map(|v| v * scale).collect());
+        }
+        id
     }
 
     fn layer_id(&mut self, name: &str) -> u32 {
@@ -257,7 +311,7 @@ impl<'a> World<'a> {
             return id;
         }
         let id = self.layers.len() as u32;
-        self.layers.push(Layer { name: name.to_string(), color, visible: true });
+        self.layers.push(Layer { name: name.to_string(), color, visible: true, linetype: String::new() });
         self.layer_ids.insert(key, id);
         id
     }
@@ -273,7 +327,7 @@ impl<'a> World<'a> {
 
     pub(crate) fn path(&mut self, points: Vec<P>, m: &Affine, pen: Pen) {
         if points.len() >= 2 {
-            self.paths.push(Path { points: points.into_iter().map(|p| m.apply(p)).collect(), color: pen.color, width: pen.width, layer: pen.layer });
+            self.paths.push(Path { points: points.into_iter().map(|p| m.apply(p)).collect(), color: pen.color, width: pen.width, dash: pen.dash, layer: pen.layer });
         }
     }
 
@@ -296,14 +350,14 @@ impl<'a> World<'a> {
 
     pub(crate) fn circle_arc(&mut self, centre: P, r: f64, start: f64, sweep: f64, m: &Affine, pen: Pen) {
         if r > 0.0 {
-            self.arc(Arc { centre, u: [r, 0.0], v: [0.0, r], t0: start, t1: start + sweep, color: pen.color, width: pen.width, layer: pen.layer }, m);
+            self.arc(Arc { centre, u: [r, 0.0], v: [0.0, r], t0: start, t1: start + sweep, color: pen.color, width: pen.width, dash: pen.dash, layer: pen.layer }, m);
         }
     }
 
     /// `ratio` is minor / major axis, negated for a flipped extrusion: the minor axis is the
     /// extrusion direction × the major axis.
     pub(crate) fn ellipse(&mut self, centre: P, u: P, ratio: f64, t0: f64, t1: f64, m: &Affine, pen: Pen) {
-        self.arc(Arc { centre, u, v: [-u[1] * ratio, u[0] * ratio], t0, t1: t0 + sweep(t0, t1), color: pen.color, width: pen.width, layer: pen.layer }, m);
+        self.arc(Arc { centre, u, v: [-u[1] * ratio, u[0] * ratio], t0, t1: t0 + sweep(t0, t1), color: pen.color, width: pen.width, dash: pen.dash, layer: pen.layer }, m);
     }
 
     /// Straight runs become paths and bulged segments arcs; segments with a width become filled
@@ -399,6 +453,7 @@ impl<'a> World<'a> {
             texts: self.texts.into_iter().map(|t| Text { pos: pt(t.pos), x: vec(t.x), up: vec(t.up), ..t }).collect(),
             fills: self.fills.into_iter().map(|f| Fill { rings: f.rings.into_iter().map(|r| r.into_iter().map(pt).collect()).collect(), ..f }).collect(),
             images: self.images.into_iter().map(|i| PlacedImage { pos: pt(i.pos), ..i }).collect(),
+            dashes: self.dashes,
             background: self.page.map(|(a, b, color)| Background {
                 pos: pt([a[0].min(b[0]), a[1].max(b[1])]),
                 size: [(a[0] - b[0]).abs(), (a[1] - b[1]).abs()],
@@ -507,6 +562,32 @@ fn mitre(t: P, neighbour: Option<P>, half: f64) -> P {
     [normal[0] * half, normal[1] * half]
 }
 
+/// Canvas dash array (alternating on and off lengths, starting with on) for an AutoCAD linetype
+/// pattern, or empty if it has no gaps. A leading gap moves to the end.
+fn canvas_dash(pattern: impl IntoIterator<Item = f64>) -> Vec<f64> {
+    let (mut out, mut lead): (Vec<f64>, f64) = (Vec::new(), 0.0);
+    for v in pattern {
+        let on = v >= 0.0;
+        if out.is_empty() && !on {
+            lead -= v;
+        } else if !out.is_empty() && (out.len() % 2 == 1) == on {
+            *out.last_mut().unwrap() += v.abs();
+        } else {
+            out.push(v.abs());
+        }
+    }
+    if out.len() % 2 == 1 {
+        out.push(0.0);
+    }
+    if let Some(gap) = out.last_mut() {
+        *gap += lead;
+    }
+    if out.iter().skip(1).step_by(2).all(|&gap| gap <= 0.0) {
+        out.clear();
+    }
+    out
+}
+
 /// `$INSUNITS` code to unit name, or "" if unitless.
 pub(crate) fn units_name(code: i64) -> &'static str {
     match code {
@@ -531,6 +612,8 @@ pub struct Layer {
     pub color: u32,
     /// False if the layer is off or frozen.
     pub visible: bool,
+    /// Linetype name, or empty for continuous.
+    pub linetype: String,
 }
 
 fn layer(r: &Record) -> Layer {
@@ -538,7 +621,8 @@ fn layer(r: &Record) -> Layer {
     let frozen = r.i(70, 0) & 1 != 0;
     // A negative colour index means the layer is off.
     let name = r.get(2).unwrap_or("").trim().to_string();
-    Layer { name, color: true_color(r).unwrap_or_else(|| color::aci(index.abs())), visible: index >= 0 && !frozen }
+    let linetype = r.get(6).unwrap_or("").trim().to_string();
+    Layer { name, color: true_color(r).unwrap_or_else(|| color::aci(index.abs())), visible: index >= 0 && !frozen, linetype }
 }
 
 fn true_color(r: &Record) -> Option<u32> {
@@ -632,37 +716,58 @@ impl Affine {
         let [a, b, c, d, ..] = self.0;
         [a * x + c * y, b * x + d * y]
     }
+
+    /// How much lengths grow, on average over directions: the square root of the area scale.
+    pub(crate) fn length_scale(&self) -> f64 {
+        let [a, b, c, d, ..] = self.0;
+        (a * d - b * c).abs().sqrt()
+    }
+}
+
+/// What an INSERT or DIMENSION passes on to its block's entities: its layer, which entities on
+/// layer 0 take on, and its colour and linetype (index), for BYBLOCK.
+#[derive(Clone, Copy)]
+pub(crate) struct Parent<'a> {
+    pub layer: &'a str,
+    pub color: u32,
+    pub linetype: u32,
 }
 
 /// Inherited state while expanding blocks.
 pub(crate) struct Ctx<'a> {
     pub m: Affine,
-    /// Layer of the enclosing INSERT, which entities on layer 0 take on.
-    pub layer: Option<&'a str>,
-    /// Colour of the enclosing INSERT, for BYBLOCK.
-    pub color: u32,
+    /// The enclosing INSERT or DIMENSION, if any.
+    pub parent: Option<Parent<'a>>,
     pub depth: u32,
 }
 
 impl Ctx<'_> {
-    pub(crate) const ROOT: Ctx<'static> = Ctx { m: Affine::IDENTITY, layer: None, color: FOREGROUND, depth: 0 };
+    pub(crate) const ROOT: Ctx<'static> = Ctx { m: Affine::IDENTITY, parent: None, depth: 0 };
 }
 
-/// Effective layer name, colour and layer index. `index` is the ACI colour (0 BYBLOCK, 256 or
-/// negative BYLAYER); `true_color` overrides it.
-pub(crate) fn style<'a>(w: &mut World, own: &'a str, true_color: Option<u32>, index: i64, ctx: &Ctx<'a>) -> (&'a str, Pen) {
-    let name = match ctx.layer {
-        Some(parent) if own == "0" => parent,
+/// What an entity passes on as a parent, and its pen. `index` is the ACI colour (0 BYBLOCK, 256 or
+/// negative BYLAYER); `true_color` overrides it. `linetype` is the entity's linetype name (empty
+/// for BYLAYER) and scale.
+pub(crate) fn style<'a>(w: &mut World, own: &'a str, true_color: Option<u32>, index: i64, linetype: (&str, f64), ctx: &Ctx<'a>) -> (Parent<'a>, Pen) {
+    let name = match ctx.parent {
+        Some(parent) if own == "0" => parent.layer,
         _ => own,
     };
     let layer = w.layer_id(name);
-    let by_layer = w.layers[layer as usize].color;
+    let by_layer = &w.layers[layer as usize];
     let color = true_color.unwrap_or_else(|| match index {
-        0 => ctx.color,
-        256.. | ..0 => by_layer,
+        0 => ctx.parent.map_or(FOREGROUND, |p| p.color),
+        256.. | ..0 => by_layer.color,
         index => color::aci(index),
     });
-    (name, Pen { color, layer, width: 0.0 })
+    let (own_linetype, scale) = linetype;
+    let linetype = match own_linetype.trim().to_uppercase().as_str() {
+        "" | "BYLAYER" => w.linetype_id(&by_layer.linetype),
+        "BYBLOCK" => ctx.parent.map_or(0, |p| p.linetype),
+        name => w.linetype_id(name),
+    };
+    let dash = w.dash(linetype, scale * ctx.m.length_scale());
+    (Parent { layer: name, color, linetype }, Pen { color, layer, width: 0.0, dash })
 }
 
 /// Block transforms for an INSERT at `at` (after `m` and the entity's OCS `ocs`): one per cell of
@@ -715,7 +820,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             return;
         }
         let own = r.get(8).map_or("0", str::trim);
-        let (layer, pen) = style(&mut self.world, own, true_color(r), r.i(62, 256), ctx);
+        let (parent, pen) = style(&mut self.world, own, true_color(r), r.i(62, 256), (r.get(6).unwrap_or(""), r.f(48, 1.0)), ctx);
         let (m, w) = (ctx.m, &mut self.world);
         match r.kind {
             "LINE" => w.path(vec![r.point(10), r.point(11)], &m, pen),
@@ -796,7 +901,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                 let scale = [r.f(41, 1.0), r.f(42, 1.0)];
                 let step = [r.f(44, 0.0), r.f(45, 0.0)];
                 for cell in insert_cells(&m, Affine::ocs(r), r.point(10), r.f(50, 0.0).to_radians(), scale, block.base, grid, step) {
-                    self.expand(&r.name(2), cell, layer, pen, ctx);
+                    self.expand(&r.name(2), cell, parent, ctx);
                 }
                 for attrib in &e.children {
                     // Attribute flag 1: invisible.
@@ -806,7 +911,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                 }
             }
             // A dimension's lines, arrows and text are in an anonymous block, already in world coordinates.
-            "DIMENSION" => self.expand(&r.name(2), m, layer, pen, ctx),
+            "DIMENSION" => self.expand(&r.name(2), m, parent, ctx),
             // Attribute definitions show as ATTRIBs on the INSERT instead.
             "ATTDEF" => {}
             kind => w.skip(kind),
@@ -814,12 +919,12 @@ impl<'a, 'b> Builder<'a, 'b> {
     }
 
     /// Draws block `name` with transform `m`, as the child of an INSERT or DIMENSION.
-    fn expand(&mut self, name: &str, m: Affine, layer: &'a str, pen: Pen, ctx: &Ctx<'a>) {
+    fn expand(&mut self, name: &str, m: Affine, parent: Parent<'a>, ctx: &Ctx<'a>) {
         if ctx.depth >= MAX_DEPTH {
             return;
         }
         let Some(block) = self.blocks.get(name) else { return };
-        let inner = Ctx { m, layer: Some(layer), color: pen.color, depth: ctx.depth + 1 };
+        let inner = Ctx { m, parent: Some(parent), depth: ctx.depth + 1 };
         for e in &block.entities {
             self.entity(e, &inner);
         }
@@ -972,6 +1077,43 @@ mod tests {
         assert!(close(first[0], [0.0, 1.0]) && close(first[1], [9.0, 1.0]) && close(first[2], [11.0, -1.0]) && close(first[3], [0.0, -1.0]), "{first:?}");
         let second = ring(1);
         assert!(close(second[0], [8.0, 2.0]) && close(second[1], [10.0, 10.0]) && close(second[3], [12.0, -2.0]), "{second:?}");
+    }
+
+    #[test]
+    fn linetype_patterns_to_canvas() {
+        assert_eq!(canvas_dash([12.0, -3.0]), [12.0, 3.0]);
+        assert_eq!(canvas_dash([24.0, -3.0, 0.0, -3.0]), [24.0, 3.0, 0.0, 3.0]);
+        assert_eq!(canvas_dash([-3.0, 12.0, 0.0, -1.0]), [12.0, 4.0]);
+        assert!(canvas_dash([5.0, 0.0]).is_empty() && canvas_dash([]).is_empty());
+    }
+
+    #[test]
+    fn linetype_by_layer_by_block_and_scale() {
+        let g = [
+            (0, "SECTION"), (2, "HEADER"), (9, "$LTSCALE"), (40, "2"), (0, "ENDSEC"),
+            (0, "SECTION"), (2, "TABLES"),
+            (0, "LTYPE"), (2, "DASHED"), (73, "2"), (40, "4"), (49, "3"), (74, "0"), (49, "-1"), (74, "0"),
+            (0, "LTYPE"), (2, "FENCE"), (73, "2"), (40, "4"), (49, "3"), (74, "0"), (49, "-1"), (74, "2"),
+            (0, "LAYER"), (2, "Hidden"), (62, "7"), (6, "DASHED"),
+            (0, "ENDSEC"),
+            (0, "SECTION"), (2, "BLOCKS"),
+            (0, "BLOCK"), (2, "b"), (10, "0"), (20, "0"),
+            (0, "LINE"), (8, "0"), (6, "BYBLOCK"), (10, "0"), (20, "0"), (11, "1"), (21, "0"),
+            (0, "ENDBLK"), (0, "ENDSEC"),
+            (0, "SECTION"), (2, "ENTITIES"),
+            (0, "LINE"), (8, "Hidden"), (10, "0"), (20, "0"), (11, "10"), (21, "0"),
+            (0, "LINE"), (8, "Hidden"), (6, "CONTINUOUS"), (10, "0"), (20, "1"), (11, "10"), (21, "1"),
+            (0, "LINE"), (8, "0"), (6, "FENCE"), (10, "0"), (20, "2"), (11, "10"), (21, "2"),
+            (0, "INSERT"), (8, "0"), (6, "DASHED"), (48, "0.5"), (2, "b"), (10, "0"), (20, "3"), (41, "3"), (42, "3"),
+            (0, "ENDSEC"), (0, "EOF"),
+        ];
+        let d = decode(&dxf(&g)).unwrap();
+        let dash = |i: usize| d.dashes[d.paths[i].dash as usize].clone();
+        // BYLAYER × $LTSCALE 2; CONTINUOUS and the complex FENCE are solid.
+        assert_eq!(dash(0), [6.0, 2.0]);
+        assert!(dash(1).is_empty() && dash(2).is_empty());
+        // BYBLOCK takes the INSERT's DASHED, scaled by $LTSCALE and the insert scale 3, not its own 0.5.
+        assert_eq!(dash(3), [18.0, 6.0]);
     }
 
     #[test]

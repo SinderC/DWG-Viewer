@@ -8,7 +8,8 @@ the built page's Content-Security-Policy blocks all network access. Supported fo
   PackBits, uncompressed), including multi-page files. Colour images are limited to 200 megapixels.
 - **DXF** (ASCII, model space): lines, polylines with arcs and widths, circles, arcs, ellipses, splines, points,
   SOLID/TRACE/3DFACE outlines, TEXT/MTEXT/attributes, nested blocks and dimensions, in layer and
-  entity colours. Not drawn: hatches, linetypes (dashes), line weights, images, 3D meshes, binary DXF.
+  entity colours and linetypes (complex linetypes are drawn solid). Not drawn: hatches, line weights,
+  images, 3D meshes, binary DXF.
 - **DWG** R13 to 2018+ (read with the `acadrust` crate): the same model-space entities as DXF.
   R12 and older DWG files are not supported.
 - **HP-GL, HP-GL/2 and HP RTL** plot files (`.plt`, `.hpgl`, …), plain or wrapped in PCL/PJL: lines,

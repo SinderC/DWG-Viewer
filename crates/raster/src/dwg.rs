@@ -8,7 +8,7 @@ use acadrust::entities::{AttributeEntity, EntityCommon};
 use acadrust::types::{Color, Vector3};
 use acadrust::{CadDocument, DwgReader, EntityType};
 
-use crate::dxf::{self, parse, Affine, Ctx, Layer, Pen, World, P};
+use crate::dxf::{self, parse, Affine, Ctx, Layer, Parent, Pen, World, P};
 
 pub fn decode(data: &[u8]) -> Result<dxf::Drawing, String> {
     let code = data.get(..6).and_then(|v| std::str::from_utf8(v).ok()).filter(|v| v.starts_with("AC"));
@@ -23,7 +23,7 @@ pub fn decode(data: &[u8]) -> Result<dxf::Drawing, String> {
         .iter()
         .map(|l| {
             let (index, rgb) = color(&l.color);
-            Layer { name: l.name.clone(), color: rgb.unwrap_or_else(|| dxf::aci(index)), visible: l.is_visible() }
+            Layer { name: l.name.clone(), color: rgb.unwrap_or_else(|| dxf::aci(index)), visible: l.is_visible(), linetype: l.line_type.clone() }
         })
         .collect();
     let units = dxf::units_name(doc.header.insertion_units.into());
@@ -31,6 +31,10 @@ pub fn decode(data: &[u8]) -> Result<dxf::Drawing, String> {
     info.extend(dxf::summary(units, &layers, doc.block_records.names(), doc.model_space_entities().count()));
 
     let mut b = Builder { doc: &doc, world: World::new(layers) };
+    // Complex linetypes (shapes or text in the gaps) are drawn solid.
+    for lt in doc.line_types.iter().filter(|lt| lt.elements.iter().all(|e| e.complex.is_none())) {
+        b.world.add_linetype(&lt.name, lt.elements.iter().map(|e| e.length * doc.header.linetype_scale));
+    }
     for e in doc.model_space_entities() {
         b.entity(e, &Ctx::ROOT);
     }
@@ -70,7 +74,7 @@ struct Builder<'a> {
 
 impl<'a> Builder<'a> {
     fn entity(&mut self, e: &'a EntityType, ctx: &Ctx<'a>) {
-        let Some((layer, pen)) = self.style(e.common(), ctx) else { return };
+        let Some((parent, pen)) = self.style(e.common(), ctx) else { return };
         let (m, w) = (ctx.m, &mut self.world);
         let ocs = |normal: Vector3| m.then(&Affine::extrusion(normal.z));
         match e {
@@ -126,7 +130,7 @@ impl<'a> Builder<'a> {
                 let grid = (i.column_count.into(), i.row_count.into());
                 let cells = dxf::insert_cells(&m, Affine::extrusion(i.normal.z), xy(i.insert_point), i.rotation, [i.x_scale(), i.y_scale()], base, grid, [i.column_spacing, i.row_spacing]);
                 for cell in cells {
-                    self.expand(&i.block_name, cell, layer, pen, ctx);
+                    self.expand(&i.block_name, cell, parent, ctx);
                 }
                 for a in i.attributes.iter().filter(|a| !a.flags.invisible) {
                     if let Some((_, pen)) = self.style(&a.common, ctx) {
@@ -135,29 +139,29 @@ impl<'a> Builder<'a> {
                 }
             }
             // A dimension's lines, arrows and text are in an anonymous block, already in world coordinates.
-            EntityType::Dimension(d) => self.expand(&d.base().block_name, m, layer, pen, ctx),
+            EntityType::Dimension(d) => self.expand(&d.base().block_name, m, parent, ctx),
             // Attribute definitions show as attributes on the INSERT instead.
             EntityType::AttributeDefinition(_) => {}
             other => w.skip(other.as_entity().entity_type()),
         }
     }
 
-    /// Effective layer name and pen, or None if the entity is invisible.
-    fn style(&mut self, c: &'a EntityCommon, ctx: &Ctx<'a>) -> Option<(&'a str, Pen)> {
+    /// What the entity passes on as a parent, and its pen; None if it is invisible.
+    fn style(&mut self, c: &'a EntityCommon, ctx: &Ctx<'a>) -> Option<(Parent<'a>, Pen)> {
         if c.invisible {
             return None;
         }
         let own = if c.layer.is_empty() { "0" } else { c.layer.as_str() };
         let (index, rgb) = color(&c.color);
-        Some(dxf::style(&mut self.world, own, rgb, index, ctx))
+        Some(dxf::style(&mut self.world, own, rgb, index, (&c.linetype, c.linetype_scale), ctx))
     }
 
     /// Draws block `name` with transform `m`, as the child of an INSERT or DIMENSION.
-    fn expand(&mut self, name: &str, m: Affine, layer: &'a str, pen: Pen, ctx: &Ctx<'a>) {
+    fn expand(&mut self, name: &str, m: Affine, parent: Parent<'a>, ctx: &Ctx<'a>) {
         if ctx.depth >= dxf::MAX_DEPTH {
             return;
         }
-        let inner = Ctx { m, layer: Some(layer), color: pen.color, depth: ctx.depth + 1 };
+        let inner = Ctx { m, parent: Some(parent), depth: ctx.depth + 1 };
         let doc = self.doc;
         for e in doc.entities_in_block(name) {
             self.entity(e, &inner);
