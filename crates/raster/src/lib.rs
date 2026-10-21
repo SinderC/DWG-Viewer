@@ -209,6 +209,29 @@ impl DxfDoc {
         self.drawing.arcs.iter().map(|a| a.width).collect()
     }
 
+    /// Index into the dash patterns of each path; 0 = solid.
+    #[wasm_bindgen(js_name = pathDashes)]
+    pub fn path_dashes(&self) -> Vec<u32> {
+        self.drawing.paths.iter().map(|p| p.dash).collect()
+    }
+
+    #[wasm_bindgen(js_name = arcDashes)]
+    pub fn arc_dashes(&self) -> Vec<u32> {
+        self.drawing.arcs.iter().map(|a| a.dash).collect()
+    }
+
+    /// All dash patterns' on and off lengths, in drawing units, one pattern after another.
+    #[wasm_bindgen(js_name = dashLengths)]
+    pub fn dash_lengths(&self) -> Vec<f64> {
+        self.drawing.dashes.iter().flatten().copied().collect()
+    }
+
+    /// Number of lengths in each dash pattern; the first (solid) has none.
+    #[wasm_bindgen(js_name = dashCounts)]
+    pub fn dash_counts(&self) -> Vec<u32> {
+        self.drawing.dashes.iter().map(|d| d.len() as u32).collect()
+    }
+
     /// Ring vertices of all fills as x, y pairs.
     #[wasm_bindgen(js_name = fillPoints)]
     pub fn fill_points(&self) -> Vec<f64> {

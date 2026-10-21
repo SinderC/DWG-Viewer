@@ -538,7 +538,7 @@ impl Decoder {
     }
 
     fn pen(&mut self, color: Colour, width: f64) -> Pen {
-        Pen { color: self.st.resolve(color), layer: self.layer(), width }
+        Pen { color: self.st.resolve(color), layer: self.layer(), width, dash: 0 }
     }
 
     fn line_pen(&mut self) -> Pen {
@@ -557,7 +557,7 @@ impl Decoder {
         let Some(pattern) = dash_pattern(line_type) else {
             return match edge {
                 Edge::Line(points) => self.world.path(points, &m, pen),
-                Edge::Curve { c, u, v, t0, t1 } => self.world.arc(Arc { centre: c, u, v, t0, t1, color: pen.color, width: pen.width, layer: pen.layer }, &m),
+                Edge::Curve { c, u, v, t0, t1 } => self.world.arc(Arc { centre: c, u, v, t0, t1, color: pen.color, width: pen.width, dash: pen.dash, layer: pen.layer }, &m),
             };
         };
         // The dash unit grows with the line width so thick dashes stay longer than they are wide.
@@ -756,7 +756,7 @@ impl Decoder {
             3 => [plus, cross].concat(),
             5 => cross.to_vec(),
             4 => {
-                let circle = Arc { centre: p, u: [r, 0.0], v: [0.0, r], t0: 0.0, t1: TAU, color: pen.color, width: 0.0, layer: pen.layer };
+                let circle = Arc { centre: p, u: [r, 0.0], v: [0.0, r], t0: 0.0, t1: TAU, color: pen.color, width: 0.0, dash: 0, layer: pen.layer };
                 return self.world.arc(circle, &m);
             }
             // A dot, the smallest visible mark: a small filled disc.

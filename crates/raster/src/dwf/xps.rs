@@ -442,7 +442,7 @@ impl Drawer<'_> {
     }
 
     fn pen(&self, color: u32, width: f64) -> Pen {
-        Pen { color: pen_color(color), layer: self.layer, width }
+        Pen { color: pen_color(color), layer: self.layer, width, dash: 0 }
     }
 
     fn element(&mut self, n: &Node, m: &Affine) {
