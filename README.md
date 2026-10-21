@@ -6,7 +6,7 @@ the built page's Content-Security-Policy blocks all network access. Supported fo
 - **CALS raster** Type 1
 - **TIFF**: black/white (CCITT G4, PackBits, uncompressed) and grey/colour (LZW, Deflate, JPEG,
   PackBits, uncompressed), including multi-page files. Colour images are limited to 200 megapixels.
-- **DXF** (ASCII, model space): lines, polylines with arcs, circles, arcs, ellipses, splines, points,
+- **DXF** (ASCII, model space): lines, polylines with arcs and widths, circles, arcs, ellipses, splines, points,
   SOLID/TRACE/3DFACE outlines, TEXT/MTEXT/attributes, nested blocks and dimensions, in layer and
   entity colours. Not drawn: hatches, linetypes (dashes), line weights, images, 3D meshes, binary DXF.
 - **DWG** R13 to 2018+ (read with the `acadrust` crate): the same model-space entities as DXF.

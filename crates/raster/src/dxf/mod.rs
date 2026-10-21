@@ -306,28 +306,49 @@ impl<'a> World<'a> {
         self.arc(Arc { centre, u, v: [-u[1] * ratio, u[0] * ratio], t0, t1: t0 + sweep(t0, t1), color: pen.color, width: pen.width, layer: pen.layer }, m);
     }
 
-    /// Straight runs become paths; each bulged segment (bulge = tan(sweep / 4)) becomes an arc.
-    pub(crate) fn polyline(&mut self, verts: &[(P, f64)], closed: bool, m: &Affine, pen: Pen) {
+    /// Straight runs become paths and bulged segments arcs; segments with a width become filled
+    /// bands, mitred where they meet their neighbours, as AutoCAD draws them.
+    pub(crate) fn polyline(&mut self, verts: &[Vertex], closed: bool, m: &Affine, pen: Pen) {
         if verts.is_empty() {
             return;
         }
-        let segments = if closed { verts.len() } else { verts.len() - 1 };
         let mut run = vec![verts[0].0];
-        for i in 0..segments {
-            let ([x1, y1], bulge) = verts[i];
-            let [x2, y2] = verts[(i + 1) % verts.len()].0;
-            if bulge.abs() < 1e-9 {
-                run.push([x2, y2]);
+        for i in 0..segment_count(verts, closed) {
+            let (a, bulge, widths) = verts[i];
+            let b = verts[(i + 1) % verts.len()].0;
+            if bulge.abs() < 1e-9 && widths == [0.0; 2] {
+                run.push(b);
                 continue;
             }
-            self.path(std::mem::replace(&mut run, vec![[x2, y2]]), m, pen);
-            let k = (1.0 - bulge * bulge) / (4.0 * bulge);
-            let centre = [(x1 + x2) / 2.0 - (y2 - y1) * k, (y1 + y2) / 2.0 + (x2 - x1) * k];
-            let r = (x2 - x1).hypot(y2 - y1) * (1.0 + bulge * bulge) / (4.0 * bulge.abs());
-            let start = (y1 - centre[1]).atan2(x1 - centre[0]);
-            self.circle_arc(centre, r, start, 4.0 * bulge.atan(), m, pen);
+            self.path(std::mem::replace(&mut run, vec![b]), m, pen);
+            if widths != [0.0; 2] {
+                self.band(verts, closed, i, m, pen);
+            } else {
+                let (centre, r, start, sweep) = bulge_arc(a, b, bulge);
+                self.circle_arc(centre, r, start, sweep, m, pen);
+            }
         }
         self.path(run, m, pen);
+    }
+
+    /// Segment `i` of a wide polyline as a filled outline, its ends mitred against the neighbouring segments.
+    fn band(&mut self, verts: &[Vertex], closed: bool, i: usize, m: &Affine, pen: Pen) {
+        let n = segment_count(verts, closed);
+        let samples = segment_points(verts, i);
+        let [w0, w1] = verts[i].2;
+        let prev = (i > 0 || closed).then(|| segment_points(verts, (i + n - 1) % n).last().map(|s| s.1)).flatten();
+        let next = (i + 1 < n || closed).then(|| segment_points(verts, (i + 1) % n).first().map(|s| s.1)).flatten();
+        let last = samples.len().saturating_sub(1);
+        let (mut left, mut right) = (Vec::new(), Vec::new());
+        for (k, &(p, t)) in samples.iter().enumerate() {
+            let half = (w0 + (w1 - w0) * k as f64 / last.max(1) as f64) / 2.0;
+            let neighbour = if k == 0 { prev } else if k == last { next } else { None };
+            let off = mitre(t, neighbour, half);
+            left.push([p[0] + off[0], p[1] + off[1]]);
+            right.push([p[0] - off[0], p[1] - off[1]]);
+        }
+        left.extend(right.into_iter().rev());
+        self.fill(vec![left], false, m, pen);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -427,6 +448,63 @@ impl Arc {
 pub(crate) fn sweep(t0: f64, t1: f64) -> f64 {
     let sweep = (t1 - t0).rem_euclid(TAU);
     if sweep == 0.0 { TAU } else { sweep }
+}
+
+/// A polyline vertex: its position, the bulge (tan(sweep / 4)) of the segment that starts there, and
+/// that segment's start and end widths.
+pub(crate) type Vertex = (P, f64, [f64; 2]);
+
+fn segment_count(verts: &[Vertex], closed: bool) -> usize {
+    if closed { verts.len() } else { verts.len().saturating_sub(1) }
+}
+
+/// Centre, radius, start angle and sweep of the arc from `a` to `b` with `bulge`.
+fn bulge_arc(a: P, b: P, bulge: f64) -> (P, f64, f64, f64) {
+    let ([x1, y1], [x2, y2]) = (a, b);
+    let k = (1.0 - bulge * bulge) / (4.0 * bulge);
+    let centre = [(x1 + x2) / 2.0 - (y2 - y1) * k, (y1 + y2) / 2.0 + (x2 - x1) * k];
+    let r = (x2 - x1).hypot(y2 - y1) * (1.0 + bulge * bulge) / (4.0 * bulge.abs());
+    (centre, r, (y1 - centre[1]).atan2(x1 - centre[0]), 4.0 * bulge.atan())
+}
+
+/// Points along polyline segment `i`, each with the unit direction of travel there: the two ends
+/// of a straight segment, or an arc flattened to steps of at most 1/64 turn. Empty if it has no length.
+fn segment_points(verts: &[Vertex], i: usize) -> Vec<(P, P)> {
+    let (a, bulge, _) = verts[i];
+    let b = verts[(i + 1) % verts.len()].0;
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let len = dx.hypot(dy);
+    if len < 1e-12 {
+        return Vec::new();
+    }
+    if bulge.abs() < 1e-9 {
+        let t = [dx / len, dy / len];
+        return vec![(a, t), (b, t)];
+    }
+    let (centre, r, start, sweep) = bulge_arc(a, b, bulge);
+    let steps = ((sweep.abs() / (TAU / 64.0)).ceil() as usize).max(2);
+    (0..=steps)
+        .map(|k| {
+            let (s, c) = (start + sweep * k as f64 / steps as f64).sin_cos();
+            ([centre[0] + r * c, centre[1] + r * s], [-s * sweep.signum(), c * sweep.signum()])
+        })
+        .collect()
+}
+
+/// Offset to the left of direction `t` at distance `half`, along the bisector with the
+/// neighbouring segment's direction there if it has one, so two bands meet without a notch.
+fn mitre(t: P, neighbour: Option<P>, half: f64) -> P {
+    let normal = [-t[1], t[0]];
+    if let Some(u) = neighbour {
+        let bisector = [normal[0] - u[1], normal[1] + u[0]];
+        let len = bisector[0].hypot(bisector[1]);
+        // Turns sharper than about 150° are not mitred, so the spike stays short.
+        let cos = (bisector[0] * normal[0] + bisector[1] * normal[1]) / len;
+        if len > 1e-9 && cos > 0.25 {
+            return [bisector[0] / len * half / cos, bisector[1] / len * half / cos];
+        }
+    }
+    [normal[0] * half, normal[1] * half]
 }
 
 /// `$INSUNITS` code to unit name, or "" if unitless.
@@ -652,12 +730,16 @@ impl<'a, 'b> Builder<'a, 'b> {
                 w.ellipse(r.point(10), r.point(11), ratio, r.f(41, 0.0), r.f(42, TAU), &m, pen);
             }
             "LWPOLYLINE" => {
-                let mut verts: Vec<(P, f64)> = Vec::new();
+                // Constant width (43) applies to vertices without their own widths (40, 41).
+                let constant = r.f(43, 0.0);
+                let mut verts: Vec<Vertex> = Vec::new();
                 for p in r.pairs {
                     let v = || p.value.trim().parse().unwrap_or(0.0);
                     match (p.code, verts.last_mut()) {
-                        (10, _) => verts.push(([v(), 0.0], 0.0)),
+                        (10, _) => verts.push(([v(), 0.0], 0.0, [constant; 2])),
                         (20, Some(last)) => last.0[1] = v(),
+                        (40, Some(last)) => last.2[0] = v(),
+                        (41, Some(last)) => last.2[1] = v(),
                         (42, Some(last)) => last.1 = v(),
                         _ => {}
                     }
@@ -671,7 +753,9 @@ impl<'a, 'b> Builder<'a, 'b> {
                     return;
                 }
                 // Spline frame control points (vertex flag 16) are not part of the curve.
-                let verts: Vec<_> = e.children.iter().filter(|v| v.kind == "VERTEX" && v.i(70, 0) & 16 == 0).map(|v| (v.point(10), v.f(42, 0.0))).collect();
+                // Vertices without their own widths take the polyline's defaults (40, 41).
+                let widths = |v: &Record| [v.f(40, r.f(40, 0.0)), v.f(41, r.f(41, 0.0))];
+                let verts: Vec<_> = e.children.iter().filter(|v| v.kind == "VERTEX" && v.i(70, 0) & 16 == 0).map(|v| (v.point(10), v.f(42, 0.0), widths(v))).collect();
                 let ocs = if flags & 8 != 0 { Affine::IDENTITY } else { Affine::ocs(r) };
                 w.polyline(&verts, flags & 1 != 0, &m.then(&ocs), pen);
             }
@@ -870,6 +954,24 @@ mod tests {
         assert!(close(a.at(a.t1), [2.0, 0.0]));
         assert!(close(a.at((a.t0 + a.t1) / 2.0), [1.0, 1.0]));
         assert!((d.height - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn wide_polyline_is_mitred_bands() {
+        // Width 2 along (0,0) → (10,0) → (10,10); the last segment tapers to 0 from its own start width 4.
+        let d = decode(&entities(&[
+            (0, "LWPOLYLINE"), (90, "3"), (70, "0"), (43, "2"),
+            (10, "0"), (20, "0"), (10, "10"), (20, "0"), (40, "4"), (41, "0"), (10, "10"), (20, "10"),
+        ]))
+        .unwrap();
+        assert!(d.paths.is_empty() && d.arcs.is_empty());
+        let world = |q: &P| [q[0] + d.origin[0], d.origin[1] - q[1]];
+        let ring = |i: usize| d.fills[i].rings[0].iter().map(world).collect::<Vec<_>>();
+        // The first band ends on the bisector of the corner: (9, 1) inside, (11, -1) outside.
+        let first = ring(0);
+        assert!(close(first[0], [0.0, 1.0]) && close(first[1], [9.0, 1.0]) && close(first[2], [11.0, -1.0]) && close(first[3], [0.0, -1.0]), "{first:?}");
+        let second = ring(1);
+        assert!(close(second[0], [8.0, 2.0]) && close(second[1], [10.0, 10.0]) && close(second[3], [12.0, -2.0]), "{second:?}");
     }
 
     #[test]

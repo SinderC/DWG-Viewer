@@ -51,6 +51,11 @@ fn color(c: &Color) -> (i64, Option<u32>) {
     }
 }
 
+/// A polyline vertex's start and end widths, or the polyline's own (constant or default) widths if it has none.
+fn widths(own: [f64; 2], default: [f64; 2]) -> [f64; 2] {
+    if own == [0.0; 2] { default } else { own }
+}
+
 /// Draws a TEXT-like attribute (on an INSERT, or standalone).
 fn attribute(w: &mut World, a: &AttributeEntity, m: &Affine, pen: Pen) {
     let (h, v) = (a.horizontal_alignment as i64, a.vertical_alignment as i64);
@@ -78,16 +83,17 @@ impl<'a> Builder<'a> {
                 w.ellipse(xy(el.center), xy(el.major_axis), ratio, el.start_parameter, el.end_parameter, &m, pen);
             }
             EntityType::LwPolyline(p) => {
-                let verts: Vec<_> = p.vertices.iter().map(|v| ([v.location.x, v.location.y], v.bulge)).collect();
+                let verts: Vec<_> = p.vertices.iter().map(|v| ([v.location.x, v.location.y], v.bulge, widths([v.start_width, v.end_width], [p.constant_width; 2]))).collect();
                 w.polyline(&verts, p.is_closed, &ocs(p.normal), pen);
             }
             EntityType::Polyline2D(p) => {
                 // Spline frame control points (vertex flag 16) are not part of the curve.
-                let verts: Vec<_> = p.vertices.iter().filter(|v| v.flags.bits() & 16 == 0).map(|v| (xy(v.location), v.bulge)).collect();
+                let verts = p.vertices.iter().filter(|v| v.flags.bits() & 16 == 0);
+                let verts: Vec<_> = verts.map(|v| (xy(v.location), v.bulge, widths([v.start_width, v.end_width], [p.start_width, p.end_width]))).collect();
                 w.polyline(&verts, p.flags.is_closed(), &ocs(p.normal), pen);
             }
             EntityType::Polyline3D(p) => {
-                let verts: Vec<_> = p.vertices.iter().filter(|v| v.flags & 16 == 0).map(|v| (xy(v.position), 0.0)).collect();
+                let verts: Vec<_> = p.vertices.iter().filter(|v| v.flags & 16 == 0).map(|v| (xy(v.position), 0.0, [0.0; 2])).collect();
                 w.polyline(&verts, p.flags.closed, &m, pen);
             }
             // SOLID and TRACE list their corners in zig-zag order.
