@@ -155,6 +155,7 @@ pub fn decode(data: &[u8]) -> Result<Drawing, String> {
     let mut header: &[Pair] = &[];
     let mut layers = Vec::new();
     let mut linetypes = Vec::new();
+    let mut dimstyles = Vec::new();
     let mut blocks = HashMap::new();
     let mut entities = Vec::new();
     let mut found_section = false;
@@ -174,6 +175,7 @@ pub fn decode(data: &[u8]) -> Result<Drawing, String> {
             Some("TABLES") => {
                 layers.extend(body.iter().filter(|r| r.kind == "LAYER").map(layer));
                 linetypes.extend(body.iter().filter(|r| r.kind == "LTYPE").copied());
+                dimstyles.extend(body.iter().filter(|r| r.kind == "DIMSTYLE").copied());
             }
             Some("BLOCKS") => blocks = parse_blocks(body),
             Some("ENTITIES") => entities = group(body),
@@ -191,7 +193,11 @@ pub fn decode(data: &[u8]) -> Result<Drawing, String> {
     info.extend(header_var(header, "$DWGCODEPAGE").map(|v| ("Code page".to_string(), v.to_string())));
     info.extend(summary(units, &layers, blocks.keys().map(String::as_str), model_space));
 
-    let mut b = Builder { blocks: &blocks, world: World::new(layers) };
+    // Leader arrow sizes: DIMASZ × DIMSCALE of each dimension style, or of the header.
+    let header_f = |name: &str, default: f64| header_var(header, name).and_then(|v| v.parse().ok()).unwrap_or(default);
+    let (dimasz, dimscale) = (header_f("$DIMASZ", 0.18), header_f("$DIMSCALE", 1.0));
+    let arrow_sizes = dimstyles.iter().map(|r| (r.name(2), arrow_size(r.f(41, dimasz), r.f(40, dimscale)))).collect();
+    let mut b = Builder { blocks: &blocks, world: World::new(layers), arrow_sizes, arrow_size: arrow_size(dimasz, dimscale) };
     let ltscale = header_var(header, "$LTSCALE").and_then(|v| v.parse().ok()).unwrap_or(1.0);
     // Complex linetypes (element type 74 non-zero: shapes or text in the gaps) are drawn solid.
     for lt in linetypes.iter().filter(|r| r.pairs.iter().all(|p| p.code != 74 || p.value.trim() == "0")) {
@@ -246,6 +252,8 @@ pub(crate) struct World<'a> {
     texts: Vec<Text>,
     fills: Vec<Fill>,
     images: Vec<PlacedImage>,
+    /// RAYs and XLINEs (true: unbounded both ways) by base point and direction, in world coordinates.
+    rays: Vec<(P, P, bool, Pen)>,
     /// Page corners (world coordinates) and colour.
     page: Option<(P, P, u32)>,
     /// Entity types that are not drawn, with how often they occur (block contents once per insert).
@@ -268,9 +276,9 @@ impl<'a> World<'a> {
         layers.sort_by_cached_key(|l| l.name.to_uppercase());
         layers.dedup_by(|a, b| a.name.to_uppercase() == b.name.to_uppercase());
         let layer_ids = layers.iter().enumerate().map(|(i, l)| (l.name.to_uppercase(), i as u32)).collect();
-        let (paths, arcs, texts, fills, images, skipped, linetype_ids, dash_ids) = Default::default();
+        let (paths, arcs, texts, fills, images, rays, skipped, linetype_ids, dash_ids) = Default::default();
         let (linetypes, dashes) = (vec![Vec::new()], vec![Vec::new()]);
-        World { paths, arcs, texts, fills, images, page: None, skipped, layers, layer_ids, linetypes, linetype_ids, dashes, dash_ids }
+        World { paths, arcs, texts, fills, images, rays, page: None, skipped, layers, layer_ids, linetypes, linetype_ids, dashes, dash_ids }
     }
 
     /// Adds linetype `name` with its AutoCAD pattern: dashes positive, gaps negative, dots 0.
@@ -404,8 +412,7 @@ impl<'a> World<'a> {
             for l in &root.lines {
                 let points: Vec<P> = l.points.iter().copied().chain([root.connection]).collect();
                 if let [tip, next, ..] = points[..] {
-                    let at = Affine::translate(tip).then(&Affine::rotate((tip[1] - next[1]).atan2(tip[0] - next[0])));
-                    arrows.push((m.then(&at).then(&Affine::scale(ml.arrow_size, ml.arrow_size)), l.arrow.clone().or_else(|| ml.arrow.clone())));
+                    arrows.push((m.then(&arrow(tip, next, ml.arrow_size)), l.arrow.clone().or_else(|| ml.arrow.clone())));
                 }
                 self.path(points, m, line);
             }
@@ -416,6 +423,26 @@ impl<'a> World<'a> {
     /// The default arrowhead, closed and filled, in arrow block units.
     pub(crate) fn arrowhead(&mut self, m: &Affine, pen: Pen) {
         self.fill(vec![vec![[0.0, 0.0], [-1.0, 1.0 / 6.0], [-1.0, -1.0 / 6.0]]], false, m, pen);
+    }
+
+    /// A RAY from `base` along `dir`, or an XLINE through it if `both_ways`. It is cut off at
+    /// `RAY_REACH` drawing sizes beyond the extents of everything else.
+    pub(crate) fn ray(&mut self, base: P, dir: P, both_ways: bool, m: &Affine, pen: Pen) {
+        let dir = m.linear(dir);
+        if dir != [0.0; 2] {
+            self.rays.push((m.apply(base), dir, both_ways, pen));
+        }
+    }
+
+    /// A LEADER through `points` (a fitted curve if `spline`), with the default arrowhead of
+    /// `arrow_size` at its first point unless that is 0.
+    pub(crate) fn leader(&mut self, points: Vec<P>, spline: bool, arrow_size: f64, m: &Affine, pen: Pen) {
+        if let [tip, next, ..] = points[..] {
+            if arrow_size > 0.0 {
+                self.arrowhead(&m.then(&arrow(tip, next, arrow_size)), pen);
+            }
+        }
+        self.path(if spline { through(&points) } else { points }, m, pen);
     }
 
     /// `pos` is the top-left corner in world coordinates (Y up).
@@ -506,7 +533,7 @@ impl<'a> World<'a> {
         }
     }
 
-    pub(crate) fn finish(self, units: &'static str, mut info: Vec<(String, String)>) -> Result<Drawing, String> {
+    pub(crate) fn finish(mut self, units: &'static str, mut info: Vec<(String, String)>) -> Result<Drawing, String> {
         if !self.skipped.is_empty() {
             let list: Vec<_> = self.skipped.iter().map(|(kind, n)| format!("{kind} × {n}")).collect();
             info.push(("Not drawn".to_string(), list.join(", ")));
@@ -518,6 +545,13 @@ impl<'a> World<'a> {
         // A single point or a straight horizontal/vertical line still needs a non-zero size to fit.
         let size = (max[0] - min[0]).max(max[1] - min[1]).max(1e-9);
         let (width, height) = ((max[0] - min[0]).max(size * 1e-3), (max[1] - min[1]).max(size * 1e-3));
+        let reach = RAY_REACH * size;
+        for (base, dir, both_ways, pen) in std::mem::take(&mut self.rays) {
+            let ends = clip_line(base, dir, if both_ways { f64::NEG_INFINITY } else { 0.0 }, [min[0] - reach, min[1] - reach], [max[0] + reach, max[1] + reach]);
+            if let Some([a, b]) = ends {
+                self.path(vec![a, b], &Affine::IDENTITY, pen);
+            }
+        }
 
         let origin = [min[0], max[1]];
         let pt = |p: P| [p[0] - origin[0], origin[1] - p[1]];
@@ -567,6 +601,7 @@ impl<'a> World<'a> {
             grow(a);
             grow(b);
         }
+        self.rays.iter().filter(|r| include(r.3.layer)).for_each(|r| grow(r.0));
         (min[0] <= max[0] && min[1] <= max[1]).then_some((min, max))
     }
 }
@@ -576,6 +611,38 @@ impl Arc {
         let (s, c) = t.sin_cos();
         [self.centre[0] + self.u[0] * c + self.v[0] * s, self.centre[1] + self.u[1] * c + self.v[1] * s]
     }
+}
+
+/// Leader arrow size from DIMASZ and DIMSCALE (0 meaning 1, as in model space).
+pub(crate) fn arrow_size(dimasz: f64, dimscale: f64) -> f64 {
+    dimasz * if dimscale > 0.0 { dimscale } else { 1.0 }
+}
+
+/// How far, in drawing sizes, RAYs and XLINEs reach beyond the drawing's extents.
+const RAY_REACH: f64 = 10.0;
+
+/// The part of the line `base + t·dir`, `t` ≥ `t_min`, inside the box from `lo` to `hi`, as its two ends.
+fn clip_line(base: P, dir: P, t_min: f64, lo: P, hi: P) -> Option<[P; 2]> {
+    let (mut t0, mut t1) = (t_min, f64::INFINITY);
+    for k in 0..2 {
+        if dir[k] == 0.0 {
+            if base[k] < lo[k] || base[k] > hi[k] {
+                return None;
+            }
+        } else {
+            let (a, b) = ((lo[k] - base[k]) / dir[k], (hi[k] - base[k]) / dir[k]);
+            (t0, t1) = (t0.max(a.min(b)), t1.min(a.max(b)));
+        }
+    }
+    let at = |t: f64| [base[0] + dir[0] * t, base[1] + dir[1] * t];
+    (t0 < t1).then(|| [at(t0), at(t1)])
+}
+
+/// Transform from arrow block units (tip at the origin, pointing along +X, size 1) to an arrow
+/// of `size` at `tip`, pointing away from `from`.
+fn arrow(tip: P, from: P, size: f64) -> Affine {
+    let angle = (tip[1] - from[1]).atan2(tip[0] - from[0]);
+    Affine::translate(tip).then(&Affine::rotate(angle)).then(&Affine::scale(size, size))
 }
 
 /// Sweep from `t0` to `t1` counter-clockwise; equal angles mean a full turn.
@@ -996,6 +1063,9 @@ pub(crate) fn mtext_align(attach: i64) -> (u8, u8) {
 struct Builder<'a, 'b> {
     blocks: &'b HashMap<String, Block<'a>>,
     world: World<'a>,
+    /// Leader arrow size by upper-case dimension style name, and for styles not listed.
+    arrow_sizes: HashMap<String, f64>,
+    arrow_size: f64,
 }
 
 impl<'a, 'b> Builder<'a, 'b> {
@@ -1061,6 +1131,14 @@ impl<'a, 'b> Builder<'a, 'b> {
                 w.path(pts.to_vec(), &m, pen);
             }
             "SPLINE" => w.path(spline(r), &m, pen),
+            "RAY" | "XLINE" => w.ray(r.point(10), r.point(11), r.kind == "XLINE", &m, pen),
+            "LEADER" => {
+                let points = r.pairs.iter().filter(|p| p.code == 10).zip(r.pairs.iter().filter(|p| p.code == 20));
+                let points = points.map(|(x, y)| [x.value.trim().parse().unwrap_or(0.0), y.value.trim().parse().unwrap_or(0.0)]).collect();
+                // Vertices are in world coordinates. Arrowhead flag 71 (default on); path type 72: 1 is a spline.
+                let size = if r.i(71, 1) == 0 { 0.0 } else { self.arrow_sizes.get(&r.name(3)).copied().unwrap_or(self.arrow_size) };
+                w.leader(points, r.i(72, 0) == 1, size, &m, pen);
+            }
             "HATCH" => {
                 let (rings, pattern) = hatch(r);
                 // A gradient (450 = 1) is filled with its first colour.
@@ -1524,6 +1602,43 @@ mod tests {
         // An arrowhead block replaces it, scaled by the arrow size.
         let d = decode(&multileader_dxf("2F")).unwrap();
         assert!(d.fills.is_empty() && (d.arcs[0].u[0].hypot(d.arcs[0].u[1]) - 1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ray_and_xline_reach_past_extents_without_growing_them() {
+        let d = decode(&entities(&[
+            (0, "LINE"), (8, "0"), (10, "0"), (20, "0"), (11, "10"), (21, "10"),
+            (0, "RAY"), (8, "0"), (10, "5"), (20, "5"), (11, "1"), (21, "0"),
+            (0, "XLINE"), (8, "0"), (10, "5"), (20, "5"), (11, "0"), (21, "1"),
+        ]))
+        .unwrap();
+        assert_eq!((d.width, d.height), (10.0, 10.0));
+        let world = |q: P| [q[0] + d.origin[0], d.origin[1] - q[1]];
+        let ends = |i: usize| [world(d.paths[i].points[0]), world(d.paths[i].points[1])];
+        // RAY_REACH (10) drawing sizes beyond the extents (0, 0)–(10, 10).
+        assert_eq!(ends(1), [[5.0, 5.0], [110.0, 5.0]]);
+        assert_eq!(ends(2), [[5.0, -100.0], [5.0, 110.0]]);
+    }
+
+    #[test]
+    fn leader_arrow_sized_by_its_dimension_style() {
+        let g = [
+            (0, "SECTION"), (2, "HEADER"), (9, "$DIMASZ"), (40, "1"), (0, "ENDSEC"),
+            (0, "SECTION"), (2, "TABLES"), (0, "DIMSTYLE"), (2, "ISO"), (41, "2.5"), (40, "2"), (0, "ENDSEC"),
+            (0, "SECTION"), (2, "ENTITIES"),
+            (0, "LEADER"), (8, "0"), (3, "ISO"), (71, "1"), (72, "0"), (76, "3"), (10, "0"), (20, "0"), (10, "10"), (20, "0"), (10, "10"), (20, "5"),
+            (0, "LEADER"), (8, "0"), (3, "Other"), (10, "0"), (20, "10"), (10, "10"), (20, "10"),
+            (0, "LEADER"), (8, "0"), (3, "ISO"), (71, "0"), (10, "0"), (20, "20"), (10, "10"), (20, "20"),
+            (0, "ENDSEC"), (0, "EOF"),
+        ];
+        let d = decode(&dxf(&g)).unwrap();
+        let world = |q: P| [q[0] + d.origin[0], d.origin[1] - q[1]];
+        assert_eq!(d.paths[0].points.iter().map(|&q| world(q)).collect::<Vec<_>>(), [[0.0, 0.0], [10.0, 0.0], [10.0, 5.0]]);
+        // ISO: 2.5 × DIMSCALE 2 = 5, pointing at (0, 0) from (10, 0). An unknown style takes $DIMASZ 1; 71 = 0 has none.
+        assert_eq!(d.fills.len(), 2);
+        let ring: Vec<P> = d.fills[0].rings[0].iter().map(|&q| world(q)).collect();
+        assert!(close(ring[0], [0.0, 0.0]) && close(ring[1], [5.0, -5.0 / 6.0]), "{ring:?}");
+        assert!(close(world(d.fills[1].rings[0][1]), [1.0, 10.0 - 1.0 / 6.0]));
     }
 
     #[test]

@@ -4,7 +4,7 @@
 use std::f64::consts::TAU;
 use std::io::Cursor;
 
-use acadrust::entities::{AttributeEntity, BoundaryEdge, BoundaryPath, EntityCommon};
+use acadrust::entities::{AttributeEntity, BoundaryEdge, BoundaryPath, EntityCommon, LeaderPathType};
 use acadrust::types::{Color, Handle, Vector2, Vector3};
 use acadrust::{CadDocument, DwgReader, EntityType};
 
@@ -180,6 +180,17 @@ impl<'a> Builder<'a> {
                     }
                 }
             }
+            EntityType::Ray(r) => w.ray(xy(r.base_point), xy(r.direction), false, &m, pen),
+            EntityType::XLine(x) => w.ray(xy(x.base_point), xy(x.direction), true, &m, pen),
+            EntityType::Leader(l) => {
+                // Only R13/R14 leaders carry their own arrow size; later ones take their dimension style's.
+                let (header, style) = (&self.doc.header, self.doc.dim_styles.get(&l.dimension_style));
+                let dimasz = Some(l.arrow_size).filter(|&s| s > 0.0).or(style.map(|s| s.dimasz)).unwrap_or(header.dim_arrow_size);
+                let scale = style.map_or(header.dim_scale, |s| s.dimscale);
+                let size = if l.arrow_enabled { dxf::arrow_size(dimasz, scale) } else { 0.0 };
+                let spline = l.path_type == LeaderPathType::Spline;
+                w.leader(l.vertices.iter().map(|&v| xy(v)).collect(), spline, size, &m, pen);
+            }
             EntityType::Hatch(h) => {
                 let rings = h.paths.iter().map(boundary).collect();
                 let lines: Vec<_> = h.pattern.lines.iter().map(|l| HatchLine { angle: l.angle, base: v2(l.base_point), offset: v2(l.offset), dashes: l.dash_lengths.clone() }).collect();
@@ -267,6 +278,7 @@ impl<'a> Builder<'a> {
 
 #[cfg(test)]
 mod tests {
+    use acadrust::entities::{Leader, Ray, XLine};
     use acadrust::{CadDocument, DwgWriter, EntityType, Line};
 
     use super::*;
@@ -279,6 +291,21 @@ mod tests {
         assert_eq!((d.width, d.height), (100.0, 50.0));
         assert_eq!(d.paths.len(), 1);
         assert!(d.info[0].0 == "DWG version" && d.info[0].1.starts_with("AC"), "{:?}", d.info);
+    }
+
+    #[test]
+    fn reads_ray_xline_and_leader() {
+        let v = |x: f64, y: f64| Vector3::new(x, y, 0.0);
+        let mut doc = CadDocument::new();
+        doc.add_entity(EntityType::Line(Line::from_coords(0.0, 0.0, 0.0, 10.0, 10.0, 0.0))).unwrap();
+        doc.add_entity(EntityType::Ray(Ray::new(v(5.0, 5.0), v(1.0, 0.0)))).unwrap();
+        doc.add_entity(EntityType::XLine(XLine::new(v(5.0, 5.0), v(0.0, 1.0)))).unwrap();
+        doc.add_entity(EntityType::Leader(Leader::from_vertices(vec![v(0.0, 0.0), v(4.0, 4.0)]))).unwrap();
+        let d = decode(&DwgWriter::write_to_vec(&doc).unwrap()).unwrap();
+        assert_eq!((d.width, d.height), (10.0, 10.0));
+        // Line, leader, then the ray and xline, which are added once the extents are known.
+        assert_eq!(d.paths.len(), 4);
+        assert_eq!(d.fills.len(), 1, "leader arrowhead");
     }
 
     #[test]
