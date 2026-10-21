@@ -1,4 +1,5 @@
 import type { DrawingDocument, View } from './formats/types';
+import { drawGrid } from './grid';
 import { Spring } from './spring';
 
 /** Raster zoom limit, in device pixels per drawing pixel. */
@@ -94,6 +95,7 @@ export class Viewer {
   /** Recent pointer positions of the drag in progress, in CSS pixels, newest last. */
   private drag: { x: number; y: number; t: number }[] | null = null;
   private paperIndex = 0;
+  private grid = false;
   private frame = 0;
   private motion: Motion | null = null;
   /** The springs of a running view animation: log scale, then the drawing point at the canvas centre. */
@@ -138,6 +140,13 @@ export class Viewer {
     this.paperIndex = (this.paperIndex + 1) % PAPERS.length;
     this.redraw();
     return this.paper;
+  }
+
+  /** Shows or hides the grid on vector drawings. Returns the new state. */
+  toggleGrid(): boolean {
+    this.grid = !this.grid;
+    this.redraw();
+    return this.grid;
   }
 
   /** One drawing pixel per device pixel, keeping the canvas centre fixed. Raster only. */
@@ -386,6 +395,7 @@ export class Viewer {
       const started = performance.now();
       if (this.doc && (this.doc.kind === 'vector' || (width > 0 && height > 0))) {
         drawDocument(this.ctx, this.doc, this.view, width, height, this.paper);
+        if (this.grid && this.doc.kind === 'vector') drawGrid(this.ctx, this.view, this.doc.origin, this.paper.invert);
       } else {
         this.ctx.clearRect(0, 0, width, height);
       }
