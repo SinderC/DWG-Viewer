@@ -289,7 +289,6 @@ export function vectorDocument(doc: DxfDoc): VectorDocument {
       pageCount: doc.pageCount,
       info: infoRows(doc.info()),
       layers: layerList,
-      lineScale: 1,
       draw(ctx, view, invert) {
         const { scale, x, y } = view;
         const { width, height } = ctx.canvas;
@@ -320,7 +319,7 @@ export function vectorDocument(doc: DxfDoc): VectorDocument {
           if (!layerList[layer].visible) continue;
           for (const { color, width: lineWidth, dash, period, dot, path } of byStyle.values()) {
             ctx.strokeStyle = css(color, invert);
-            ctx.lineWidth = Math.max(lineWidth * this.lineScale, (dot ? MIN_DOT_PX : 1) / scale);
+            ctx.lineWidth = Math.max(lineWidth, (dot ? MIN_DOT_PX : 1) / scale);
             ctx.setLineDash(period * scale < MIN_DASH_PX ? [] : dash);
             ctx.stroke(path);
           }

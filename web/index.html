@@ -293,32 +293,6 @@
       #layers-panel.open ~ #minimap { right: 288px; }
       #minimap canvas { position: static; display: block; border-radius: 6px; cursor: pointer; }
 
-      /* Popover menu: grows out of the button that opened it. */
-      .menu {
-        position: fixed;
-        inset: auto;
-        margin: 0;
-        min-width: 180px;
-        padding: 4px;
-        translate: -50% 0;
-        border-radius: 12px;
-        color: var(--fg);
-        transform-origin: bottom center;
-        opacity: 0;
-        transform: translateY(4px) scale(0.96);
-        transition: transform 220ms var(--ease-out), opacity 160ms ease-out, overlay 220ms allow-discrete, display 220ms allow-discrete;
-      }
-      .menu:popover-open { opacity: 1; transform: none; }
-      @starting-style {
-        .menu:popover-open { opacity: 0; transform: translateY(4px) scale(0.96); }
-      }
-      /* Menu rows stay rounded rectangles, concentric with the menu. */
-      .menu button { border-radius: 8px; justify-content: flex-start; width: 100%; padding: 0 10px 0 6px; }
-      .menu button svg { visibility: hidden; color: var(--accent); }
-      .menu button[aria-checked='true'] svg { visibility: visible; }
-      .menu button span { flex: 1; text-align: left; }
-      .menu button small { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
-
       /* Toast for progress and errors. */
       #toast {
         position: fixed;
@@ -367,7 +341,7 @@
         transform: scale(0.96);
         transition: transform 280ms var(--ease-out), opacity 200ms ease-out, overlay 280ms allow-discrete, display 280ms allow-discrete;
       }
-      dialog.glass, .menu.glass { background: var(--sheet); -webkit-backdrop-filter: blur(40px) saturate(180%); backdrop-filter: blur(40px) saturate(180%); }
+      dialog.glass { background: var(--sheet); -webkit-backdrop-filter: blur(40px) saturate(180%); backdrop-filter: blur(40px) saturate(180%); }
       dialog[open] { opacity: 1; transform: none; }
       @starting-style {
         dialog[open] { opacity: 0; transform: scale(0.96); }
@@ -392,24 +366,22 @@
         button:active:not(:disabled) { transform: none; }
       }
       @media (prefers-reduced-transparency: reduce) {
-        .glass, dialog.glass, .menu.glass, #toast.error { background: var(--glass-solid); -webkit-backdrop-filter: none; backdrop-filter: none; }
+        .glass, dialog.glass, #toast.error { background: var(--glass-solid); -webkit-backdrop-filter: none; backdrop-filter: none; }
       }
       @media (prefers-contrast: more) {
         :root { --glass-border: var(--fg); --separator: var(--muted); }
-        .glass, dialog.glass, .menu.glass, #toast.error { background: var(--glass-solid); -webkit-backdrop-filter: none; backdrop-filter: none; }
+        .glass, dialog.glass, #toast.error { background: var(--glass-solid); -webkit-backdrop-filter: none; backdrop-filter: none; }
       }
     </style>
   </head>
   <body>
     <svg width="0" height="0" style="position: absolute" aria-hidden="true">
-      <!-- Icons except i-drawing: Font Awesome Free 7.3.1, https://fontawesome.com, CC BY 4.0 (i-weight is a modified "bars"). -->
+      <!-- Icons except i-drawing: Font Awesome Free 7.3.1, https://fontawesome.com, CC BY 4.0. -->
       <symbol id="i-open" viewBox="0 0 576 512"><path d="M56 225.6L32.4 296.2 32.4 96c0-35.3 28.7-64 64-64l138.7 0c13.8 0 27.3 4.5 38.4 12.8l38.4 28.8c5.5 4.2 12.3 6.4 19.2 6.4l117.3 0c35.3 0 64 28.7 64 64l0 16-365.4 0c-41.3 0-78 26.4-91.1 65.6zM477.8 448L99 448c-32.8 0-55.9-32.1-45.5-63.2l48-144C108 221.2 126.4 208 147 208l378.8 0c32.8 0 55.9 32.1 45.5 63.2l-48 144c-6.5 19.6-24.9 32.8-45.5 32.8z" /></symbol>
       <symbol id="i-minus" viewBox="0 0 448 512"><path d="M0 256c0-17.7 14.3-32 32-32l384 0c17.7 0 32 14.3 32 32s-14.3 32-32 32L32 288c-17.7 0-32-14.3-32-32z" /></symbol>
       <symbol id="i-plus" viewBox="0 0 448 512"><path d="M256 64c0-17.7-14.3-32-32-32s-32 14.3-32 32l0 160-160 0c-17.7 0-32 14.3-32 32s14.3 32 32 32l160 0 0 160c0 17.7 14.3 32 32 32s32-14.3 32-32l0-160 160 0c17.7 0 32-14.3 32-32s-14.3-32-32-32l-160 0 0-160z" /></symbol>
       <symbol id="i-fit" viewBox="0 0 448 512"><path d="M32 32C14.3 32 0 46.3 0 64l0 96c0 17.7 14.3 32 32 32s32-14.3 32-32l0-64 64 0c17.7 0 32-14.3 32-32s-14.3-32-32-32L32 32zM64 352c0-17.7-14.3-32-32-32S0 334.3 0 352l0 96c0 17.7 14.3 32 32 32l96 0c17.7 0 32-14.3 32-32s-14.3-32-32-32l-64 0 0-64zM320 32c-17.7 0-32 14.3-32 32s14.3 32 32 32l64 0 0 64c0 17.7 14.3 32 32 32s32-14.3 32-32l0-96c0-17.7-14.3-32-32-32l-96 0zM448 352c0-17.7-14.3-32-32-32s-32 14.3-32 32l0 64-64 0c-17.7 0-32 14.3-32 32s14.3 32 32 32l96 0c17.7 0 32-14.3 32-32l0-96z" /></symbol>
       <symbol id="i-invert" viewBox="0 0 512 512"><path d="M448 256c0-106-86-192-192-192l0 384c106 0 192-86 192-192zM0 256a256 256 0 1 1 512 0 256 256 0 1 1 -512 0z" /></symbol>
-      <symbol id="i-weight" viewBox="0 0 448 512"><rect y="64" width="448" height="48" rx="24" /><rect y="184" width="448" height="80" rx="40" /><rect y="336" width="448" height="112" rx="56" /></symbol>
-      <symbol id="i-check" viewBox="0 0 448 512"><path d="M434.8 70.1c14.3 10.4 17.5 30.4 7.1 44.7l-256 352c-5.5 7.6-14 12.3-23.4 13.1s-18.5-2.7-25.1-9.3l-128-128c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l101.5 101.5 234-321.7c10.4-14.3 30.4-17.5 44.7-7.1z" /></symbol>
       <symbol id="i-layers" viewBox="0 0 512 512"><path d="M232.5 5.2c14.9-6.9 32.1-6.9 47 0l218.6 101c8.5 3.9 13.9 12.4 13.9 21.8s-5.4 17.9-13.9 21.8l-218.6 101c-14.9 6.9-32.1 6.9-47 0L13.9 149.8C5.4 145.8 0 137.3 0 128s5.4-17.9 13.9-21.8L232.5 5.2zM48.1 218.4l164.3 75.9c27.7 12.8 59.6 12.8 87.3 0l164.3-75.9 34.1 15.8c8.5 3.9 13.9 12.4 13.9 21.8s-5.4 17.9-13.9 21.8l-218.6 101c-14.9 6.9-32.1 6.9-47 0L13.9 277.8C5.4 273.8 0 265.3 0 256s5.4-17.9 13.9-21.8l34.1-15.8zM13.9 362.2l34.1-15.8 164.3 75.9c27.7 12.8 59.6 12.8 87.3 0l164.3-75.9 34.1 15.8c8.5 3.9 13.9 12.4 13.9 21.8s-5.4 17.9-13.9 21.8l-218.6 101c-14.9 6.9-32.1 6.9-47 0L13.9 405.8C5.4 401.8 0 393.3 0 384s5.4-17.9 13.9-21.8z" /></symbol>
       <symbol id="i-ruler" viewBox="-166 -38 588 588"><path transform="rotate(45 128 256)" d="M0 16C0-10.5 21.5-32 48-32l160 0c26.5 0 48 21.5 48 48l0 24-104 0c-13.3 0-24 10.7-24 24s10.7 24 24 24l104 0 0 48-72 0c-13.3 0-24 10.7-24 24s10.7 24 24 24l72 0 0 48-104 0c-13.3 0-24 10.7-24 24s10.7 24 24 24l104 0 0 48-72 0c-13.3 0-24 10.7-24 24s10.7 24 24 24l72 0 0 48-104 0c-13.3 0-24 10.7-24 24s10.7 24 24 24l104 0 0 24c0 26.5-21.5 48-48 48L48 544c-26.5 0-48-21.5-48-48L0 16z" /></symbol>
       <symbol id="i-export" viewBox="0 0 448 512"><path d="M256 32c0-17.7-14.3-32-32-32s-32 14.3-32 32l0 210.7-41.4-41.4c-12.5-12.5-32.8-12.5-45.3 0s-12.5 32.8 0 45.3l96 96c12.5 12.5 32.8 12.5 45.3 0l96-96c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0L256 242.7 256 32zM64 320c-35.3 0-64 28.7-64 64l0 32c0 35.3 28.7 64 64 64l320 0c35.3 0 64-28.7 64-64l0-32c0-35.3-28.7-64-64-64l-46.9 0-56.6 56.6c-31.2 31.2-81.9 31.2-113.1 0L110.9 320 64 320zm304 56a24 24 0 1 1 0 48 24 24 0 1 1 0-48z" /></symbol>
@@ -463,7 +435,6 @@
       </div>
       <div class="group doc">
         <button id="invert" title="Swap black and white" aria-label="Invert" aria-pressed="false"><svg class="icon"><use href="#i-invert" /></svg></button>
-        <button id="weight" title="Line width" aria-label="Line width" aria-pressed="false" popovertarget="weight-menu" aria-haspopup="menu" hidden><svg class="icon"><use href="#i-weight" /></svg></button>
         <button id="layers" title="Layers" aria-label="Layers" aria-pressed="false" hidden><svg class="icon"><use href="#i-layers" /></svg></button>
         <button id="find" title="Find text" aria-label="Find text" aria-pressed="false" hidden><svg class="icon"><use href="#i-search" /></svg></button>
         <button id="measure" title="Measure distance" aria-label="Measure" aria-pressed="false"><svg class="icon"><use href="#i-ruler" /></svg></button>
@@ -498,7 +469,6 @@
 
     <div id="minimap" class="glass"><canvas aria-label="Overview: click to move there"></canvas></div>
     <div id="coords" class="glass" hidden></div>
-    <div id="weight-menu" class="glass menu" popover role="menu" aria-label="Line width"></div>
     <div id="toast" class="glass" role="status" aria-live="polite"><svg class="icon" aria-hidden="true"><use href="#i-error" /></svg><span></span></div>
 
     <dialog id="info-dialog" class="glass" aria-labelledby="info-title">
