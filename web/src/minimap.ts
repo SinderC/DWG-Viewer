@@ -1,4 +1,4 @@
-import type { Viewer } from './viewer';
+import { drawDocument, type Viewer } from './viewer';
 
 /** Zoom, relative to fit, above which the overview appears. */
 const SHOW_ABOVE = 1.5;
@@ -84,8 +84,7 @@ export class Minimap {
     this.thumb.height = height;
     const ctx = this.thumb.getContext('2d')!;
     const view = { scale: width / doc.width, x: 0, y: 0 };
-    if (doc.kind === 'vector') doc.draw(ctx, view, this.viewer.isInverted);
-    else ctx.putImageData(doc.render(view, width, height, this.viewer.isInverted), 0, 0);
+    drawDocument(ctx, doc, view, width, height, this.viewer.paper);
     this.stale = false;
   }
 

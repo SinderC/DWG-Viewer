@@ -6,7 +6,7 @@ import { hpgl } from './formats/hpgl';
 import { tiff } from './formats/tiff';
 import type { DrawingDocument, FormatPlugin, Layer, TextHit, View } from './formats/types';
 import { Minimap } from './minimap';
-import { Viewer } from './viewer';
+import { PAPERS, Viewer } from './viewer';
 
 // HP-GL has no signature, so its loose sniff goes last.
 const plugins: FormatPlugin[] = [dxf, dwg, dwf, cals, tiff, cgm, hpgl];
@@ -368,8 +368,7 @@ function showPage(file: OpenFile, page: number): void {
     showLayers(layers);
     syncLayers();
     measure.a = measure.b = measure.hover = null;
-    findButton.hidden = weightButton.hidden = doc.kind !== 'vector';
-    if (doc.kind === 'vector') doc.lineScale = lineScale;
+    findButton.hidden = gridButton.hidden = doc.kind !== 'vector';
     if (findButton.hidden) toggleFind(false);
     pageLabel.textContent = `${page + 1} / ${doc.pageCount}`;
     start.hidden = true;
@@ -500,72 +499,18 @@ document.querySelectorAll('dialog').forEach((dialog) =>
   }),
 );
 const invert = $('invert');
-/** Line width choices: multipliers of the widths in the file. The choice carries over to the next file. */
-const LINE_SCALES = [
-  { scale: 0.25, label: 'Very Thin' },
-  { scale: 0.5, label: 'Thin' },
-  { scale: 1, label: 'Normal' },
-  { scale: 2, label: 'Bold' },
-];
-const weightButton = $<HTMLButtonElement>('weight');
-const weightMenu = $('weight-menu');
-let lineScale = 1;
-
-const weightItems = LINE_SCALES.map(({ scale, label }) => {
-  const item = document.createElement('button');
-  item.role = 'menuitemradio';
-  item.innerHTML = '<svg class="icon" aria-hidden="true"><use href="#i-check" /></svg><span></span><small></small>';
-  item.querySelector('span')!.textContent = label;
-  item.querySelector('small')!.textContent = `${scale}×`;
-  item.addEventListener('click', () => {
-    setLineScale(scale);
-    weightMenu.hidePopover();
-  });
-  return item;
-});
-weightMenu.replaceChildren(...weightItems);
-
-function setLineScale(scale: number): void {
-  lineScale = scale;
-  // Highlighted while it differs from the file, like the other view toggles.
-  weightButton.setAttribute('aria-pressed', String(scale !== 1));
-  weightItems.forEach((item, i) => item.setAttribute('aria-checked', String(LINE_SCALES[i].scale === scale)));
-  if (current?.doc.kind === 'vector') current.doc.lineScale = scale;
-  viewer.redraw();
-  minimap.invalidate();
-}
-setLineScale(1);
-
-/** Next line width, wrapping from Bold back to Very Thin. */
-function cycleLineScale(): void {
-  const i = LINE_SCALES.findIndex((s) => s.scale === lineScale);
-  setLineScale(LINE_SCALES[(i + 1) % LINE_SCALES.length].scale);
-}
-
-// Stand the menu on its button, centred on it.
-weightMenu.addEventListener('beforetoggle', (e) => {
-  if ((e as ToggleEvent).newState !== 'open') return;
-  const rect = weightButton.getBoundingClientRect();
-  weightMenu.style.bottom = `${window.innerHeight - rect.top + 8}px`;
-  weightMenu.style.left = `${rect.left + rect.width / 2}px`;
-});
-// Focus starts on the checked width; the arrow keys move between widths.
-weightMenu.addEventListener('toggle', (e) => {
-  if ((e as ToggleEvent).newState === 'open') weightItems.find((item) => item.getAttribute('aria-checked') === 'true')?.focus();
-});
-weightMenu.addEventListener('keydown', (e) => {
-  const step = e.key === 'ArrowDown' ? 1 : e.key === 'ArrowUp' ? -1 : 0;
-  if (!step) return;
-  e.preventDefault();
-  const i = weightItems.indexOf(document.activeElement as HTMLButtonElement);
-  weightItems[(i + step + weightItems.length) % weightItems.length].focus();
-});
-
-const toggleInvert = () => {
-  invert.setAttribute('aria-pressed', String(viewer.toggleInvert()));
+const nextPaper = () => {
+  const paper = viewer.nextPaper();
+  // Highlighted while it differs from the default, like the other view toggles.
+  invert.setAttribute('aria-pressed', String(paper !== PAPERS[0]));
+  toast(`${paper.name} paper`);
   minimap.invalidate();
 };
-invert.addEventListener('click', toggleInvert);
+invert.addEventListener('click', nextPaper);
+
+const gridButton = $<HTMLButtonElement>('grid');
+const toggleGrid = () => gridButton.setAttribute('aria-pressed', String(viewer.toggleGrid()));
+gridButton.addEventListener('click', toggleGrid);
 
 const mac = /Mac|iPhone|iPad/.test(navigator.userAgent);
 
@@ -587,8 +532,8 @@ const shortcuts: Shortcut[] = [
   { keys: ['-'], label: 'Zoom out', run: () => viewer.zoomOut(), button: 'zoom-out' },
   { keys: ['0'], label: 'Fit to window', run: () => viewer.fit(), button: 'fit' },
   { keys: ['1'], label: 'Actual pixels', run: () => viewer.actualSize(), when: () => !!current && !actualSize.hidden, button: 'actual' },
-  { keys: ['i'], label: 'Swap black and white', run: toggleInvert, button: 'invert' },
-  { keys: ['w'], label: 'Next line width', run: cycleLineScale, when: () => !weightButton.hidden, button: 'weight' },
+  { keys: ['i'], label: 'Paper: dark blue, white, black', run: nextPaper, button: 'invert' },
+  { keys: ['g'], label: 'Show or hide the grid', run: toggleGrid, when: () => !gridButton.hidden, button: 'grid' },
   { keys: ['l'], label: 'Show or hide layers', run: () => toggleLayersPanel(), when: () => !layersButton.hidden, button: 'layers' },
   { keys: ['ArrowLeft', 'PageUp'], label: 'Previous page', run: () => turnPage(-1), button: 'prev-page' },
   { keys: ['ArrowRight', 'PageDown'], label: 'Next page', run: () => turnPage(1), button: 'next-page' },

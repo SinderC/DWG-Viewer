@@ -24,8 +24,8 @@ const ARC_STEP: f64 = TAU / 360.0;
 const MAX_ARC_STEPS: f64 = 36_000.0;
 const BEZIER_STEPS: usize = 64;
 const PENS: usize = 256;
-/// Default pen width in mm (HP-GL/2).
-const PEN_WIDTH: f64 = 0.35;
+/// Default pen width in mm, thinner than HP-GL/2's 0.35.
+const PEN_WIDTH: f64 = 0.1;
 /// Default character size (SI) in cm: width and cap height.
 const CHAR_SIZE: P = [0.19, 0.27];
 /// Default relative character size (SR) in percent of P2 − P1.
