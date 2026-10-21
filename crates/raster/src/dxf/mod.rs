@@ -389,6 +389,35 @@ impl<'a> World<'a> {
         }
     }
 
+    /// Draws a multileader's lines and text. Returns each arrowhead's transform from arrow block
+    /// units (tip at the origin, pointing along +X, size 1) and its block, for the caller to draw.
+    pub(crate) fn multileader(&mut self, ml: &MultiLeader, m: &Affine, line: Pen, text: Pen) -> Vec<(Affine, Option<String>)> {
+        if let Some(t) = &ml.text {
+            self.push_text(t.at, t.angle, t.height, 1.0, mtext_align(1 + t.column as i64), parse::mtext_plain(&t.value), m, text);
+        }
+        let mut arrows = Vec::new();
+        for root in &ml.roots {
+            let [x, y] = root.connection;
+            if ml.dogleg && root.landing > 0.0 {
+                self.path(vec![root.connection, [x + root.direction[0] * root.landing, y + root.direction[1] * root.landing]], m, line);
+            }
+            for l in &root.lines {
+                let points: Vec<P> = l.points.iter().copied().chain([root.connection]).collect();
+                if let [tip, next, ..] = points[..] {
+                    let at = Affine::translate(tip).then(&Affine::rotate((tip[1] - next[1]).atan2(tip[0] - next[0])));
+                    arrows.push((m.then(&at).then(&Affine::scale(ml.arrow_size, ml.arrow_size)), l.arrow.clone().or_else(|| ml.arrow.clone())));
+                }
+                self.path(points, m, line);
+            }
+        }
+        arrows
+    }
+
+    /// The default arrowhead, closed and filled, in arrow block units.
+    pub(crate) fn arrowhead(&mut self, m: &Affine, pen: Pen) {
+        self.fill(vec![vec![[0.0, 0.0], [-1.0, 1.0 / 6.0], [-1.0, -1.0 / 6.0]]], false, m, pen);
+    }
+
     /// `pos` is the top-left corner in world coordinates (Y up).
     pub(crate) fn image(&mut self, image: Image, pos: P, px: f64, layer: u32) {
         self.images.push(PlacedImage { image, pos, px, layer });
@@ -622,6 +651,46 @@ pub(crate) struct HatchLine {
     pub dashes: Vec<f64>,
 }
 
+/// A MULTILEADER as DXF and DWG store it. Blocks are named by their block record handle (upper-case hex).
+#[derive(Default)]
+pub(crate) struct MultiLeader {
+    pub roots: Vec<LeaderRoot>,
+    /// Whether each root has a dogleg: a landing line from its connection point along its direction.
+    pub dogleg: bool,
+    pub arrow_size: f64,
+    /// Arrowhead block, or None for the default closed filled arrow.
+    pub arrow: Option<String>,
+    pub text: Option<LeaderText>,
+    /// Block content: block, insertion point, X and Y scale, rotation.
+    pub block: Option<(String, P, P, f64)>,
+}
+
+/// Where a group of leader lines meets the content.
+#[derive(Default)]
+pub(crate) struct LeaderRoot {
+    pub connection: P,
+    pub direction: P,
+    pub landing: f64,
+    pub lines: Vec<LeaderLine>,
+}
+
+/// A leader line's points, from its arrow tip to before the connection point, and its own arrowhead block.
+#[derive(Default)]
+pub(crate) struct LeaderLine {
+    pub points: Vec<P>,
+    pub arrow: Option<String>,
+}
+
+/// MTEXT content of a multileader: the top of its first line is at `at`, on the side given by
+/// `column` (0 left, 1 centre, 2 right).
+pub(crate) struct LeaderText {
+    pub value: String,
+    pub at: P,
+    pub angle: f64,
+    pub height: f64,
+    pub column: u8,
+}
+
 /// Most pattern lines drawn for one hatch; denser hatches are filled instead.
 const MAX_HATCH_LINES: i64 = 20_000;
 /// Most dashes drawn along one hatch line inside its boundary; finer ones become a solid line.
@@ -764,6 +833,8 @@ fn group<'a>(records: &[Record<'a>]) -> Vec<Entity<'a>> {
 
 struct Block<'a> {
     base: P,
+    /// Handle of its block record (upper-case hex), which multileaders refer to it by.
+    record: String,
     entities: Vec<Entity<'a>>,
 }
 
@@ -774,7 +845,7 @@ fn parse_blocks<'a>(records: &[Record<'a>]) -> HashMap<String, Block<'a>> {
         let head = rest[start];
         let body = &rest[start + 1..];
         let end = body.iter().position(|r| r.kind == "ENDBLK").unwrap_or(body.len());
-        blocks.insert(head.name(2), Block { base: head.point(10), entities: group(&body[..end]) });
+        blocks.insert(head.name(2), Block { base: head.point(10), record: head.name(330), entities: group(&body[..end]) });
         rest = &body[end..];
     }
     blocks
@@ -1035,12 +1106,38 @@ impl<'a, 'b> Builder<'a, 'b> {
                     }
                 }
             }
+            "MULTILEADER" | "MLEADER" => {
+                let (ml, line_color, text_color) = multileader(r);
+                let recolor = |c: Option<u32>| Pen { color: c.unwrap_or(pen.color), ..pen };
+                self.multileader(&ml, m, parent, recolor(line_color), recolor(text_color), ctx);
+            }
             // A dimension's lines, arrows and text are in an anonymous block, already in world coordinates.
             "DIMENSION" => self.expand(&r.name(2), m, parent, ctx),
             // Attribute definitions show as ATTRIBs on the INSERT instead.
             "ATTDEF" => {}
             kind => w.skip(kind),
         }
+    }
+
+    /// Draws a multileader: its lines and text, arrowheads (blocks or the default) and block content.
+    fn multileader(&mut self, ml: &MultiLeader, m: Affine, parent: Parent<'a>, line: Pen, text: Pen, ctx: &Ctx<'a>) {
+        for (at, arrow) in self.world.multileader(ml, &m, line, text) {
+            match arrow.and_then(|h| self.block_name(&h)) {
+                Some(name) => self.expand(&name, at, Parent { color: line.color, ..parent }, ctx),
+                None => self.world.arrowhead(&at, line),
+            }
+        }
+        let Some((handle, at, scale, rotation)) = &ml.block else { return };
+        let Some(name) = self.block_name(handle) else { return };
+        let base = self.blocks[&name].base;
+        for cell in insert_cells(&m, Affine::IDENTITY, *at, *rotation, *scale, base, (1, 1), [0.0; 2]) {
+            self.expand(&name, cell, parent, ctx);
+        }
+    }
+
+    /// Name of the block whose record has handle `hex`.
+    fn block_name(&self, hex: &str) -> Option<String> {
+        self.blocks.iter().find(|(_, b)| b.record == hex).map(|(name, _)| name.clone())
     }
 
     /// Draws block `name` with transform `m`, as the child of an INSERT or DIMENSION.
@@ -1161,6 +1258,85 @@ fn hatch(r: &Record) -> (Vec<Vec<P>>, Option<Vec<HatchLine>>) {
         })
         .collect();
     (rings, Some(lines))
+}
+
+/// A MULTILEADER's leaders and content from its CONTEXT_DATA{} section, with its leader line
+/// and text colours if they are not BYLAYER or BYBLOCK.
+fn multileader(r: &Record) -> (MultiLeader, Option<u32>, Option<u32>) {
+    let mut ml = MultiLeader::default();
+    let (mut text, mut has_text, mut block) = (LeaderText { value: String::new(), at: [0.0; 2], angle: 0.0, height: 0.0, column: 0 }, false, None);
+    let (mut line_color, mut text_color) = (None, None);
+    // 0: entity, 1: CONTEXT_DATA{, 2: LEADER{, 3: LEADER_LINE{.
+    let mut depth = 0;
+    let mut direction = [1.0, 0.0];
+    for p in r.pairs {
+        let (value, v) = (p.value.trim(), || p.value.trim().parse::<f64>().unwrap_or(0.0));
+        let root = ml.roots.last_mut();
+        match (depth, p.code) {
+            (_, 300) if value == "CONTEXT_DATA{" => depth = 1,
+            (1, 302) if value == "LEADER{" => {
+                depth = 2;
+                ml.roots.push(LeaderRoot::default());
+            }
+            (2, 304) if value == "LEADER_LINE{" => {
+                depth = 3;
+                root.into_iter().for_each(|r| r.lines.push(LeaderLine::default()));
+            }
+            (3, 305) | (2, 303) | (1, 301) if value == "}" => depth -= 1,
+            (1, 41) => text.height = v(),
+            (1, 140) => ml.arrow_size = v(),
+            (1, 290) => has_text = v() != 0.0,
+            (1, 304) => text.value = p.value.to_string(),
+            (1, 12) => text.at[0] = v(),
+            (1, 22) => text.at[1] = v(),
+            (1, 13) => direction[0] = v(),
+            (1, 23) => direction[1] = v(),
+            (1, 90) => text_color = cm_color(v() as i64),
+            (1, 171) => text.column = (v() as i64 - 1).clamp(0, 2) as u8,
+            (1, 296) if v() != 0.0 => block = Some((String::new(), [0.0; 2], [1.0; 2], 0.0)),
+            (1, 341) => block.iter_mut().for_each(|b| b.0 = value.to_uppercase()),
+            (1, 15) => block.iter_mut().for_each(|b| b.1[0] = v()),
+            (1, 25) => block.iter_mut().for_each(|b| b.1[1] = v()),
+            (1, 16) => block.iter_mut().for_each(|b| b.2[0] = v()),
+            (1, 26) => block.iter_mut().for_each(|b| b.2[1] = v()),
+            (1, 46) => block.iter_mut().for_each(|b| b.3 = v()),
+            (2, code @ (10 | 20 | 11 | 21 | 40)) => {
+                let Some(r) = root else { continue };
+                match code {
+                    10 => r.connection[0] = v(),
+                    20 => r.connection[1] = v(),
+                    11 => r.direction[0] = v(),
+                    21 => r.direction[1] = v(),
+                    _ => r.landing = v(),
+                }
+            }
+            (3, code @ (10 | 20 | 341)) => {
+                let Some(line) = root.and_then(|r| r.lines.last_mut()) else { continue };
+                match code {
+                    10 => line.points.push([v(), 0.0]),
+                    20 => line.points.last_mut().into_iter().for_each(|q| q[1] = v()),
+                    _ => line.arrow = Some(value.to_uppercase()).filter(|h| h != "0"),
+                }
+            }
+            (0, 91) => line_color = cm_color(v() as i64),
+            (0, 291) => ml.dogleg = v() != 0.0,
+            (0, 342) => ml.arrow = Some(value.to_uppercase()).filter(|h| h != "0"),
+            _ => {}
+        }
+    }
+    text.angle = direction[1].atan2(direction[0]);
+    ml.text = has_text.then_some(text);
+    ml.block = block.filter(|b| !b.0.is_empty());
+    (ml, line_color, text_color)
+}
+
+/// An AcCmColor value (as MULTILEADER stores colours) as RGB, or None for BYLAYER or BYBLOCK.
+fn cm_color(v: i64) -> Option<u32> {
+    match (v >> 24) & 0xFF {
+        0xC2 => Some(v as u32 & 0xFF_FFFF),
+        0xC3 if (1..=255).contains(&(v & 0xFF)) => Some(color::aci(v & 0xFF)),
+        _ => None,
+    }
 }
 
 /// Flattens a SPLINE from its group codes.
@@ -1313,6 +1489,41 @@ mod tests {
     fn solid_hatch_is_even_odd_fill() {
         let d = decode(&String::from_utf8(square_hatch(&[])).unwrap().replacen("70\n0\n", "70\n1\n", 1).into_bytes()).unwrap();
         assert_eq!((d.fills.len(), d.fills[0].rings.len(), d.fills[0].even_odd), (1, 2, true));
+    }
+
+    /// A MULTILEADER from (0, 0) to the connection point (10, 5), a dogleg of 4 to the right, the
+    /// text "Note" and arrowhead `arrow` (a block record handle, or "0" for the default).
+    fn multileader_dxf(arrow: &'static str) -> Vec<u8> {
+        dxf(&[
+            (0, "SECTION"), (2, "BLOCKS"),
+            (0, "BLOCK"), (5, "30"), (330, "2F"), (2, "_Dot"), (10, "0"), (20, "0"),
+            (0, "CIRCLE"), (8, "0"), (10, "0"), (20, "0"), (40, "0.5"),
+            (0, "ENDBLK"), (0, "ENDSEC"),
+            (0, "SECTION"), (2, "ENTITIES"),
+            (0, "MULTILEADER"), (8, "0"), (62, "1"), (300, "CONTEXT_DATA{"), (40, "1"), (10, "14"), (20, "5"), (41, "2"), (140, "3"),
+            (290, "1"), (304, "Note"), (12, "15"), (22, "6"), (13, "1"), (23, "0"), (90, "-1056964608"), (171, "1"), (296, "0"),
+            (302, "LEADER{"), (290, "1"), (10, "10"), (20, "5"), (11, "1"), (21, "0"), (90, "0"), (40, "4"),
+            (304, "LEADER_LINE{"), (10, "0"), (20, "0"), (91, "0"), (341, "0"), (305, "}"),
+            (303, "}"), (301, "}"),
+            (91, "-1023410171"), (290, "1"), (291, "1"), (342, arrow),
+            (0, "ENDSEC"), (0, "EOF"),
+        ])
+    }
+
+    #[test]
+    fn multileader_lines_arrow_and_text() {
+        let d = decode(&multileader_dxf("0")).unwrap();
+        let world = |q: P| [q[0] + d.origin[0], d.origin[1] - q[1]];
+        let lines: Vec<Vec<P>> = d.paths.iter().map(|p| p.points.iter().map(|&q| world(q)).collect()).collect();
+        assert_eq!(lines, [vec![[10.0, 5.0], [14.0, 5.0]], vec![[0.0, 0.0], [10.0, 5.0]]]);
+        // Leader colour 0xC3000005 is ACI 5 (blue); the text is BYBLOCK, so the entity's red.
+        assert_eq!(d.paths[0].color, 0x0000FF);
+        assert_eq!((d.texts[0].text.as_str(), d.texts[0].color, d.texts[0].valign), ("Note", 0xFF0000, 3));
+        // The default arrow is a filled triangle with its tip on the leader's first point.
+        assert!(close(world(d.fills[0].rings[0][0]), [0.0, 0.0]) && d.fills[0].color == 0x0000FF);
+        // An arrowhead block replaces it, scaled by the arrow size.
+        let d = decode(&multileader_dxf("2F")).unwrap();
+        assert!(d.fills.is_empty() && (d.arcs[0].u[0].hypot(d.arcs[0].u[1]) - 1.5).abs() < 1e-9);
     }
 
     #[test]

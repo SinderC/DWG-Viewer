@@ -5,10 +5,10 @@ use std::f64::consts::TAU;
 use std::io::Cursor;
 
 use acadrust::entities::{AttributeEntity, BoundaryEdge, BoundaryPath, EntityCommon};
-use acadrust::types::{Color, Vector2, Vector3};
+use acadrust::types::{Color, Handle, Vector2, Vector3};
 use acadrust::{CadDocument, DwgReader, EntityType};
 
-use crate::dxf::{self, parse, Affine, Ctx, HatchLine, Layer, Parent, Pen, World, P};
+use crate::dxf::{self, parse, Affine, Ctx, HatchLine, Layer, LeaderLine, LeaderRoot, LeaderText, MultiLeader, Parent, Pen, World, P};
 
 pub fn decode(data: &[u8]) -> Result<dxf::Drawing, String> {
     let code = data.get(..6).and_then(|v| std::str::from_utf8(v).ok()).filter(|v| v.starts_with("AC"));
@@ -43,6 +43,20 @@ pub fn decode(data: &[u8]) -> Result<dxf::Drawing, String> {
 
 fn xy(v: Vector3) -> P {
     [v.x, v.y]
+}
+
+/// A handle as upper-case hex, as DXF writes it; None if null.
+fn hex(h: Option<Handle>) -> Option<String> {
+    h.filter(|h| !h.is_null()).map(|h| format!("{h:X}"))
+}
+
+/// `pen` in colour `c`, unless that is BYLAYER or BYBLOCK (the entity's own colour).
+fn recolor(c: &Color, pen: Pen) -> Pen {
+    match color(c) {
+        (_, Some(rgb)) => Pen { color: rgb, ..pen },
+        (index @ 1..=255, None) => Pen { color: dxf::aci(index), ..pen },
+        _ => pen,
+    }
 }
 
 fn v2(v: Vector2) -> P {
@@ -178,6 +192,26 @@ impl<'a> Builder<'a> {
                 let solid = h.is_solid || gradient.is_some();
                 w.hatch(rings, (!solid).then_some(&lines[..]), &ocs(h.normal), pen);
             }
+            EntityType::MultiLeader(ml) => {
+                let c = &ml.context;
+                let roots = c.leader_roots.iter().map(|r| LeaderRoot {
+                    connection: xy(r.connection_point),
+                    direction: xy(r.direction),
+                    landing: r.landing_distance,
+                    lines: r.lines.iter().map(|l| LeaderLine { points: l.points.iter().map(|&p| xy(p)).collect(), arrow: hex(l.arrowhead_handle) }).collect(),
+                });
+                let text = c.has_text_contents.then(|| LeaderText {
+                    value: c.text_string.clone(),
+                    at: xy(c.text_location),
+                    angle: c.text_direction.y.atan2(c.text_direction.x),
+                    height: c.text_height,
+                    column: (c.text_attachment_point as i16 - 1).clamp(0, 2) as u8,
+                });
+                let content = hex(c.block_content_handle).filter(|_| c.has_block_contents);
+                let block = content.map(|h| (h, xy(c.block_content_location), xy(c.block_content_scale), c.block_rotation));
+                let leader = MultiLeader { roots: roots.collect(), dogleg: ml.enable_dogleg, arrow_size: c.arrowhead_size, arrow: hex(ml.arrowhead_handle), text, block };
+                self.multileader(&leader, m, parent, recolor(&ml.line_color, pen), recolor(&c.text_color, pen), ctx);
+            }
             // A dimension's lines, arrows and text are in an anonymous block, already in world coordinates.
             EntityType::Dimension(d) => self.expand(&d.base().block_name, m, parent, ctx),
             // Attribute definitions show as attributes on the INSERT instead.
@@ -194,6 +228,28 @@ impl<'a> Builder<'a> {
         let own = if c.layer.is_empty() { "0" } else { c.layer.as_str() };
         let (index, rgb) = color(&c.color);
         Some(dxf::style(&mut self.world, own, rgb, index, (&c.linetype, c.linetype_scale), ctx))
+    }
+
+    /// Draws a multileader: its lines and text, arrowheads (blocks or the default) and block content.
+    fn multileader(&mut self, ml: &MultiLeader, m: Affine, parent: Parent<'a>, line: Pen, text: Pen, ctx: &Ctx<'a>) {
+        for (at, arrow) in self.world.multileader(ml, &m, line, text) {
+            match arrow.and_then(|h| self.block_name(&h)) {
+                Some(name) => self.expand(name, at, Parent { color: line.color, ..parent }, ctx),
+                None => self.world.arrowhead(&at, line),
+            }
+        }
+        let Some((handle, at, scale, rotation)) = &ml.block else { return };
+        let Some(name) = self.block_name(handle) else { return };
+        let base = self.doc.block_records.get(name).map_or([0.0; 2], |b| xy(b.base_point));
+        for cell in dxf::insert_cells(&m, Affine::IDENTITY, *at, *rotation, *scale, base, (1, 1), [0.0; 2]) {
+            self.expand(name, cell, parent, ctx);
+        }
+    }
+
+    /// Name of the block whose record has handle `hex`.
+    fn block_name(&self, hex: &str) -> Option<&'a str> {
+        let doc = self.doc;
+        doc.block_records.iter().find(|b| format!("{:X}", b.handle) == hex).map(|b| b.name.as_str())
     }
 
     /// Draws block `name` with transform `m`, as the child of an INSERT or DIMENSION.
