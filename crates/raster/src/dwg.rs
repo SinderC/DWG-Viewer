@@ -4,11 +4,11 @@
 use std::f64::consts::TAU;
 use std::io::Cursor;
 
-use acadrust::entities::{AttributeEntity, EntityCommon};
-use acadrust::types::{Color, Vector3};
+use acadrust::entities::{AttributeEntity, BoundaryEdge, BoundaryPath, EntityCommon};
+use acadrust::types::{Color, Vector2, Vector3};
 use acadrust::{CadDocument, DwgReader, EntityType};
 
-use crate::dxf::{self, parse, Affine, Ctx, Layer, Parent, Pen, World, P};
+use crate::dxf::{self, parse, Affine, Ctx, HatchLine, Layer, Parent, Pen, World, P};
 
 pub fn decode(data: &[u8]) -> Result<dxf::Drawing, String> {
     let code = data.get(..6).and_then(|v| std::str::from_utf8(v).ok()).filter(|v| v.starts_with("AC"));
@@ -43,6 +43,34 @@ pub fn decode(data: &[u8]) -> Result<dxf::Drawing, String> {
 
 fn xy(v: Vector3) -> P {
     [v.x, v.y]
+}
+
+fn v2(v: Vector2) -> P {
+    [v.x, v.y]
+}
+
+/// A hatch boundary path as one ring of points.
+fn boundary(path: &BoundaryPath) -> Vec<P> {
+    let mut ring = Vec::new();
+    for edge in &path.edges {
+        match edge {
+            BoundaryEdge::Line(l) => ring.extend([v2(l.start), v2(l.end)]),
+            BoundaryEdge::CircularArc(a) => ring.extend(dxf::arc_edge_points(v2(a.center), [a.radius, 0.0], 1.0, a.start_angle, a.end_angle, a.counter_clockwise)),
+            BoundaryEdge::EllipticArc(e) => ring.extend(dxf::arc_edge_points(v2(e.center), v2(e.major_axis_endpoint), e.minor_axis_ratio, e.start_angle, e.end_angle, e.counter_clockwise)),
+            BoundaryEdge::Spline(s) => {
+                let ctrl: Vec<_> = s.control_points.iter().map(|&p| xy(p)).collect();
+                let weights: Vec<_> = if s.rational { s.control_points.iter().map(|p| p.z).collect() } else { Vec::new() };
+                let fit: Vec<_> = s.fit_points.iter().map(|&p| v2(p)).collect();
+                ring.extend(dxf::spline_points(s.degree.max(1) as usize, &ctrl, &s.knots, &weights, &fit));
+            }
+            // Vertex z is the bulge.
+            BoundaryEdge::Polyline(p) => {
+                let verts: Vec<_> = p.vertices.iter().map(|v| ([v.x, v.y], v.z, [0.0; 2])).collect();
+                ring.extend(dxf::polyline_points(&verts, p.is_closed));
+            }
+        }
+    }
+    ring
 }
 
 /// ACI index (0 BYBLOCK, 256 BYLAYER) and true colour, as `dxf::style` takes them.
@@ -137,6 +165,18 @@ impl<'a> Builder<'a> {
                         attribute(&mut self.world, a, &m, pen);
                     }
                 }
+            }
+            EntityType::Hatch(h) => {
+                let rings = h.paths.iter().map(boundary).collect();
+                let lines: Vec<_> = h.pattern.lines.iter().map(|l| HatchLine { angle: l.angle, base: v2(l.base_point), offset: v2(l.offset), dashes: l.dash_lengths.clone() }).collect();
+                // A gradient is filled with its first colour.
+                let gradient = h.gradient_color.colors.first().filter(|_| h.gradient_color.enabled).map(|c| color(&c.color));
+                let pen = match gradient {
+                    Some((index, rgb)) => Pen { color: rgb.unwrap_or_else(|| dxf::aci(index)), ..pen },
+                    None => pen,
+                };
+                let solid = h.is_solid || gradient.is_some();
+                w.hatch(rings, (!solid).then_some(&lines[..]), &ocs(h.normal), pen);
             }
             // A dimension's lines, arrows and text are in an anonymous block, already in world coordinates.
             EntityType::Dimension(d) => self.expand(&d.base().block_name, m, parent, ctx),

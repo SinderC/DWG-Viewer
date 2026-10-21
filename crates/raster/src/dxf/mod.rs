@@ -339,6 +339,56 @@ impl<'a> World<'a> {
         }
     }
 
+    /// A hatch over the even-odd area of `rings`: filled if `pattern` is None, otherwise drawn as
+    /// each pattern line family clipped to it. Patterns too dense to draw line by line are filled.
+    pub(crate) fn hatch(&mut self, rings: Vec<Vec<P>>, pattern: Option<&[HatchLine]>, m: &Affine, pen: Pen) {
+        let pen = Pen { dash: 0, ..pen };
+        let edges: Vec<(P, P)> = rings.iter().flat_map(|r| r.iter().copied().zip(r.iter().copied().cycle().skip(1))).collect();
+        // Each family's direction and normal, and the range of k whose line can cross the boundary.
+        let families: Vec<_> = pattern
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|l| {
+                let (s, c) = l.angle.sin_cos();
+                let (d, n) = ([c, s], [-s, c]);
+                let step = dot(l.offset, n);
+                // Lines with no spacing between them do not hatch anything.
+                if !(step.abs() > 1e-9 * dot(l.offset, l.offset).sqrt()) {
+                    return None;
+                }
+                let k = |p: P| (dot(p, n) - dot(l.base, n)) / step;
+                let (lo, hi) = edges.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &(a, _)| (lo.min(k(a)), hi.max(k(a))));
+                (lo <= hi).then(|| (l, d, n, lo.ceil() as i64, hi.floor() as i64))
+            })
+            .collect();
+        let lines: i64 = families.iter().map(|f| (f.4 - f.3 + 1).max(0)).sum();
+        if pattern.is_none() || lines > MAX_HATCH_LINES {
+            return self.fill(rings, true, m, pen);
+        }
+        for (l, d, n, k0, k1) in families {
+            for k in k0..=k1 {
+                let o = [l.base[0] + l.offset[0] * k as f64, l.base[1] + l.offset[1] * k as f64];
+                let rel = |p: P| [p[0] - o[0], p[1] - o[1]];
+                // Where the line crosses the boundary, as distances along it from `o`.
+                let mut ts: Vec<f64> = edges
+                    .iter()
+                    .filter_map(|&(a, b)| {
+                        let (na, nb) = (dot(rel(a), n), dot(rel(b), n));
+                        let (ta, tb) = (dot(rel(a), d), dot(rel(b), d));
+                        ((na > 0.0) != (nb > 0.0)).then(|| ta + (tb - ta) * na / (na - nb))
+                    })
+                    .collect();
+                ts.sort_by(f64::total_cmp);
+                let at = |t: f64| [o[0] + d[0] * t, o[1] + d[1] * t];
+                for inside in ts.chunks_exact(2) {
+                    for (t0, t1) in dash_spans(inside[0], inside[1], &l.dashes) {
+                        self.path(vec![at(t0), at(t1)], m, pen);
+                    }
+                }
+            }
+        }
+    }
+
     /// `pos` is the top-left corner in world coordinates (Y up).
     pub(crate) fn image(&mut self, image: Image, pos: P, px: f64, layer: u32) {
         self.images.push(PlacedImage { image, pos, px, layer });
@@ -560,6 +610,71 @@ fn mitre(t: P, neighbour: Option<P>, half: f64) -> P {
         }
     }
     [normal[0] * half, normal[1] * half]
+}
+
+/// One line of a hatch pattern, in the hatch's coordinates (already scaled and rotated, as files
+/// store them): lines at `angle` through `base` + k·`offset` for every integer k, dashed by
+/// `dashes` (an AutoCAD pattern that starts at each line's base point; empty for solid lines).
+pub(crate) struct HatchLine {
+    pub angle: f64,
+    pub base: P,
+    pub offset: P,
+    pub dashes: Vec<f64>,
+}
+
+/// Most pattern lines drawn for one hatch; denser hatches are filled instead.
+const MAX_HATCH_LINES: i64 = 20_000;
+/// Most dashes drawn along one hatch line inside its boundary; finer ones become a solid line.
+const MAX_HATCH_DASHES: f64 = 2_000.0;
+
+fn dot(a: P, b: P) -> f64 {
+    a[0] * b[0] + a[1] * b[1]
+}
+
+/// The dashes, between `t0` and `t1`, of an AutoCAD pattern that starts at 0 and repeats; dots
+/// are spans of zero length.
+fn dash_spans(t0: f64, t1: f64, pattern: &[f64]) -> Vec<(f64, f64)> {
+    let period: f64 = pattern.iter().map(|v| v.abs()).sum();
+    if !(period > 0.0) || (t1 - t0) / period > MAX_HATCH_DASHES {
+        return vec![(t0, t1)];
+    }
+    let mut out = Vec::new();
+    let mut pos = (t0 / period).floor() * period;
+    while pos <= t1 {
+        for &v in pattern {
+            let end = pos + v.abs();
+            let (a, b) = (pos.max(t0), end.min(t1));
+            if v > 0.0 && a < b || v == 0.0 && (t0..=t1).contains(&pos) {
+                out.push((a, b));
+            }
+            pos = end;
+        }
+    }
+    out
+}
+
+/// Points along a polyline, its arcs flattened as in `segment_points`.
+pub(crate) fn polyline_points(verts: &[Vertex], closed: bool) -> Vec<P> {
+    let mut out: Vec<P> = verts.first().map(|v| v.0).into_iter().collect();
+    for i in 0..segment_count(verts, closed) {
+        out.extend(segment_points(verts, i).into_iter().skip(1).map(|(p, _)| p));
+    }
+    out
+}
+
+/// Points along a hatch boundary's elliptical arc edge, `major` being the major axis (from the
+/// centre) and `ratio` minor / major. A clockwise edge's angles are measured clockwise.
+pub(crate) fn arc_edge_points(centre: P, major: P, ratio: f64, start: f64, end: f64, ccw: bool) -> Vec<P> {
+    let side = if ccw { ratio } else { -ratio };
+    let (u, v) = (major, [-major[1] * side, major[0] * side]);
+    let sweep = sweep(start, end);
+    let steps = ((sweep / (TAU / 64.0)).ceil() as usize).max(2);
+    (0..=steps)
+        .map(|k| {
+            let (s, c) = (start + sweep * k as f64 / steps as f64).sin_cos();
+            [centre[0] + u[0] * c + v[0] * s, centre[1] + u[1] * c + v[1] * s]
+        })
+        .collect()
 }
 
 /// Canvas dash array (alternating on and off lengths, starting with on) for an AutoCAD linetype
@@ -875,6 +990,16 @@ impl<'a, 'b> Builder<'a, 'b> {
                 w.path(pts.to_vec(), &m, pen);
             }
             "SPLINE" => w.path(spline(r), &m, pen),
+            "HATCH" => {
+                let (rings, pattern) = hatch(r);
+                // A gradient (450 = 1) is filled with its first colour.
+                let gradient = r.pairs.iter().skip_while(|p| p.code != 450).find(|p| p.code == 421).filter(|_| r.i(450, 0) == 1);
+                let pen = match gradient.and_then(|p| p.value.trim().parse::<i64>().ok()) {
+                    Some(rgb) => Pen { color: rgb as u32 & 0xFF_FFFF, ..pen },
+                    None => pen,
+                };
+                w.hatch(rings, pattern.as_deref(), &m.then(&Affine::ocs(r)), pen);
+            }
             "TEXT" | "ATTRIB" => {
                 // ATTRIB keeps its vertical alignment in 74; TEXT in 73.
                 let valign = r.i(if r.kind == "ATTRIB" { 74 } else { 73 }, 0);
@@ -929,6 +1054,113 @@ impl<'a, 'b> Builder<'a, 'b> {
             self.entity(e, &inner);
         }
     }
+}
+
+/// Reads groups in file order, as the HATCH boundary and pattern data needs.
+struct Cursor<'a, 'b> {
+    pairs: &'b [Pair<'a>],
+    i: usize,
+}
+
+impl Cursor<'_, '_> {
+    fn peek(&self, ahead: usize) -> Option<i32> {
+        self.pairs.get(self.i + ahead).map(|p| p.code)
+    }
+
+    /// The next group's value if it has `code`.
+    fn take(&mut self, code: i32) -> Option<f64> {
+        let p = self.pairs.get(self.i).filter(|p| p.code == code)?;
+        self.i += 1;
+        Some(p.value.trim().parse().unwrap_or(0.0))
+    }
+
+    fn f(&mut self, code: i32) -> f64 {
+        self.take(code).unwrap_or(0.0)
+    }
+
+    /// A count, at most the number of groups left.
+    fn n(&mut self, code: i32) -> usize {
+        (self.f(code).max(0.0) as usize).min(self.pairs.len() - self.i)
+    }
+
+    fn xy(&mut self, x: i32, y: i32) -> P {
+        [self.f(x), self.f(y)]
+    }
+
+    /// Moves past the next group with `code` and returns its value.
+    fn seek(&mut self, code: i32) -> Option<f64> {
+        self.i += self.pairs[self.i..].iter().position(|p| p.code == code)?;
+        self.take(code)
+    }
+}
+
+/// A HATCH's boundary rings and pattern lines (None for a solid fill).
+fn hatch(r: &Record) -> (Vec<Vec<P>>, Option<Vec<HatchLine>>) {
+    let mut c = Cursor { pairs: r.pairs, i: 0 };
+    let mut rings = Vec::new();
+    for _ in 0..c.seek(91).map_or(0, |n| (n.max(0.0) as usize).min(r.pairs.len())) {
+        let mut ring = Vec::new();
+        if c.f(92) as i64 & 2 != 0 {
+            let (bulges, closed) = (c.f(72) != 0.0, c.f(73) != 0.0);
+            let verts: Vec<Vertex> = (0..c.n(93)).map(|_| (c.xy(10, 20), if bulges { c.f(42) } else { 0.0 }, [0.0; 2])).collect();
+            ring = polyline_points(&verts, closed);
+        } else {
+            for _ in 0..c.n(93) {
+                match c.f(72) as i64 {
+                    1 => ring.extend([c.xy(10, 20), c.xy(11, 21)]),
+                    2 => {
+                        let (centre, radius) = (c.xy(10, 20), c.f(40));
+                        let (start, end) = (c.f(50).to_radians(), c.f(51).to_radians());
+                        ring.extend(arc_edge_points(centre, [radius, 0.0], 1.0, start, end, c.f(73) != 0.0));
+                    }
+                    3 => {
+                        let (centre, major, ratio) = (c.xy(10, 20), c.xy(11, 21), c.f(40));
+                        let (start, end) = (c.f(50).to_radians(), c.f(51).to_radians());
+                        ring.extend(arc_edge_points(centre, major, ratio, start, end, c.f(73) != 0.0));
+                    }
+                    4 => {
+                        let (degree, rational) = (c.f(94) as usize, c.f(73) != 0.0);
+                        c.take(74);
+                        let (knot_count, ctrl_count) = (c.n(95), c.n(96));
+                        let knots: Vec<f64> = (0..knot_count).map(|_| c.f(40)).collect();
+                        let (mut ctrl, mut weights) = (Vec::new(), Vec::new());
+                        for _ in 0..ctrl_count {
+                            ctrl.push(c.xy(10, 20));
+                            weights.extend(rational.then(|| c.f(42)));
+                        }
+                        // Fit data (R2010+) starts with a 97 count, as the path's source objects do after it.
+                        let mut fit = Vec::new();
+                        if c.peek(0) == Some(97) && matches!(c.peek(1), Some(11 | 97)) {
+                            fit = (0..c.n(97)).map(|_| c.xy(11, 21)).collect();
+                            for code in [12, 22, 13, 23] {
+                                c.take(code);
+                            }
+                        }
+                        ring.extend(spline_points(degree, &ctrl, &knots, &weights, &fit));
+                    }
+                    // Unknown edge data cannot be stepped over.
+                    _ => break,
+                }
+            }
+        }
+        // Handles of the source boundary objects.
+        for _ in 0..c.n(97) {
+            c.take(330);
+        }
+        rings.push(ring);
+    }
+    if r.i(70, 0) & 1 != 0 || r.i(450, 0) == 1 {
+        return (rings, None);
+    }
+    let count = c.seek(78).map_or(0, |n| (n.max(0.0) as usize).min(r.pairs.len()));
+    let lines = (0..count)
+        .map(|_| {
+            let angle = c.f(53).to_radians();
+            let (base, offset) = (c.xy(43, 44), c.xy(45, 46));
+            HatchLine { angle, base, offset, dashes: (0..c.n(79)).map(|_| c.f(49)).collect() }
+        })
+        .collect();
+    (rings, Some(lines))
 }
 
 /// Flattens a SPLINE from its group codes.
@@ -1042,8 +1274,54 @@ mod tests {
 
     #[test]
     fn lists_entities_not_drawn() {
-        let d = decode(&entities(&[(0, "HATCH"), (0, "HATCH"), (0, "IMAGE"), (0, "POINT"), (10, "0"), (20, "0")])).unwrap();
-        assert_eq!(d.info.last().unwrap().1, "HATCH × 2, IMAGE × 1");
+        let d = decode(&entities(&[(0, "WIPEOUT"), (0, "WIPEOUT"), (0, "IMAGE"), (0, "POINT"), (10, "0"), (20, "0")])).unwrap();
+        assert_eq!(d.info.last().unwrap().1, "IMAGE × 1, WIPEOUT × 2");
+    }
+
+    /// A HATCH of the square (0,0)–(4,4) with the hole (1,1)–(3,3): a polyline path, an edge path, then `tail`.
+    fn square_hatch(tail: &[(i32, &'static str)]) -> Vec<u8> {
+        let mut g = vec![
+            (0, "HATCH"), (8, "0"), (10, "0"), (20, "0"), (30, "0"), (2, "TEST"), (70, "0"), (71, "0"), (91, "2"),
+            (92, "2"), (72, "0"), (73, "1"), (93, "4"), (10, "0"), (20, "0"), (10, "4"), (20, "0"), (10, "4"), (20, "4"), (10, "0"), (20, "4"), (97, "0"),
+            (92, "0"), (93, "4"),
+            (72, "1"), (10, "1"), (20, "1"), (11, "3"), (21, "1"),
+            (72, "1"), (10, "3"), (20, "1"), (11, "3"), (21, "3"),
+            (72, "1"), (10, "3"), (20, "3"), (11, "1"), (21, "3"),
+            (72, "1"), (10, "1"), (20, "3"), (11, "1"), (21, "1"),
+            (97, "1"), (330, "1F"),
+        ];
+        g.extend_from_slice(tail);
+        entities(&g)
+    }
+
+    #[test]
+    fn hatch_pattern_clipped_to_boundary_with_hole() {
+        // One family: horizontal lines through (0, 0.5) + k·(0, 1).
+        let pattern = [(75, "0"), (76, "1"), (52, "0"), (41, "1"), (77, "0"), (78, "1"), (53, "0"), (43, "0"), (44, "0.5"), (45, "0"), (46, "1"), (79, "0"), (98, "0")];
+        let d = decode(&square_hatch(&pattern)).unwrap();
+        let world = |q: P| [q[0] + d.origin[0], d.origin[1] - q[1]];
+        let mut spans: Vec<_> = d.paths.iter().map(|p| (world(p.points[0]), world(p.points[1]))).collect();
+        spans.sort_by(|a, b| (a.0[1], a.0[0]).partial_cmp(&(b.0[1], b.0[0])).unwrap());
+        let want = [((0.0, 0.5), 4.0), ((0.0, 1.5), 1.0), ((3.0, 1.5), 4.0), ((0.0, 2.5), 1.0), ((3.0, 2.5), 4.0), ((0.0, 3.5), 4.0)];
+        assert_eq!(spans.len(), want.len(), "{spans:?}");
+        for ((a, b), ((x, y), end)) in spans.iter().zip(want) {
+            assert!(close(*a, [x, y]) && close(*b, [end, y]), "{a:?} {b:?}");
+        }
+    }
+
+    #[test]
+    fn solid_hatch_is_even_odd_fill() {
+        let d = decode(&String::from_utf8(square_hatch(&[])).unwrap().replacen("70\n0\n", "70\n1\n", 1).into_bytes()).unwrap();
+        assert_eq!((d.fills.len(), d.fills[0].rings.len(), d.fills[0].even_odd), (1, 2, true));
+    }
+
+    #[test]
+    fn hatch_dashes_start_at_line_base() {
+        assert_eq!(dash_spans(0.5, 4.0, &[1.0, -1.0]), [(0.5, 1.0), (2.0, 3.0)]);
+        // A dash ending on the boundary leaves no dot; a dot pattern keeps its dots.
+        assert_eq!(dash_spans(3.0, 4.0, &[1.0, -1.0]), []);
+        assert_eq!(dash_spans(0.0, 2.5, &[0.0, -1.0]), [(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)]);
+        assert_eq!(dash_spans(0.0, 2.5, &[]), [(0.0, 2.5)]);
     }
 
     #[test]
