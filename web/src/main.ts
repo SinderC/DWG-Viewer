@@ -6,7 +6,7 @@ import { hpgl } from './formats/hpgl';
 import { tiff } from './formats/tiff';
 import type { DrawingDocument, FormatPlugin, Layer, TextHit, View } from './formats/types';
 import { Minimap } from './minimap';
-import { Viewer } from './viewer';
+import { PAPERS, Viewer } from './viewer';
 
 // HP-GL has no signature, so its loose sniff goes last.
 const plugins: FormatPlugin[] = [dxf, dwg, dwf, cals, tiff, cgm, hpgl];
@@ -499,11 +499,14 @@ document.querySelectorAll('dialog').forEach((dialog) =>
   }),
 );
 const invert = $('invert');
-const toggleInvert = () => {
-  invert.setAttribute('aria-pressed', String(viewer.toggleInvert()));
+const nextPaper = () => {
+  const paper = viewer.nextPaper();
+  // Highlighted while it differs from the default, like the other view toggles.
+  invert.setAttribute('aria-pressed', String(paper !== PAPERS[0]));
+  toast(`${paper.name} paper`);
   minimap.invalidate();
 };
-invert.addEventListener('click', toggleInvert);
+invert.addEventListener('click', nextPaper);
 
 const mac = /Mac|iPhone|iPad/.test(navigator.userAgent);
 
@@ -525,7 +528,7 @@ const shortcuts: Shortcut[] = [
   { keys: ['-'], label: 'Zoom out', run: () => viewer.zoomOut(), button: 'zoom-out' },
   { keys: ['0'], label: 'Fit to window', run: () => viewer.fit(), button: 'fit' },
   { keys: ['1'], label: 'Actual pixels', run: () => viewer.actualSize(), when: () => !!current && !actualSize.hidden, button: 'actual' },
-  { keys: ['i'], label: 'Swap black and white', run: toggleInvert, button: 'invert' },
+  { keys: ['i'], label: 'Paper: dark blue, white, black', run: nextPaper, button: 'invert' },
   { keys: ['l'], label: 'Show or hide layers', run: () => toggleLayersPanel(), when: () => !layersButton.hidden, button: 'layers' },
   { keys: ['ArrowLeft', 'PageUp'], label: 'Previous page', run: () => turnPage(-1), button: 'prev-page' },
   { keys: ['ArrowRight', 'PageDown'], label: 'Next page', run: () => turnPage(1), button: 'next-page' },

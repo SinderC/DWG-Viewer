@@ -26,6 +26,26 @@ const SLOW_FRAME_MS = 25;
 
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
 
+/** Paper colours, in toggle order, the first by default. A tinted paper is drawn inverted, then its black is lightened to `tint`. */
+export const PAPERS: { name: string; invert: boolean; tint?: string }[] = [
+  { name: 'Dark blue', invert: true, tint: '#212830' },
+  { name: 'White', invert: false },
+  { name: 'Black', invert: true },
+];
+export type Paper = (typeof PAPERS)[number];
+
+/** Draws the `width` × `height` viewport of `doc` onto `ctx` on `paper`. */
+export function drawDocument(ctx: CanvasRenderingContext2D, doc: DrawingDocument, view: View, width: number, height: number, paper: Paper): void {
+  if (doc.kind === 'vector') doc.draw(ctx, view, paper.invert);
+  else ctx.putImageData(doc.render(view, width, height, paper.invert), 0, 0);
+  if (!paper.tint) return;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalCompositeOperation = 'lighten';
+  ctx.fillStyle = paper.tint;
+  ctx.fillRect(0, 0, width, height);
+  ctx.globalCompositeOperation = 'source-over';
+}
+
 /** Advances an animation by `dt` seconds; returns false once it has finished. */
 type Motion = (dt: number) => boolean;
 
@@ -73,7 +93,7 @@ export class Viewer {
   private view: View = { scale: 1, x: 0, y: 0 };
   /** Recent pointer positions of the drag in progress, in CSS pixels, newest last. */
   private drag: { x: number; y: number; t: number }[] | null = null;
-  private inverted = false;
+  private paperIndex = 0;
   private frame = 0;
   private motion: Motion | null = null;
   /** The springs of a running view animation: log scale, then the drawing point at the canvas centre. */
@@ -113,11 +133,11 @@ export class Viewer {
     if (this.doc) this.animateTo(this.fitView());
   }
 
-  /** Swaps black and white. Returns the new state. */
-  toggleInvert(): boolean {
-    this.inverted = !this.inverted;
+  /** Switches to the next paper colour, wrapping round. Returns the new paper. */
+  nextPaper(): Paper {
+    this.paperIndex = (this.paperIndex + 1) % PAPERS.length;
     this.redraw();
-    return this.inverted;
+    return this.paper;
   }
 
   /** One drawing pixel per device pixel, keeping the canvas centre fixed. Raster only. */
@@ -314,8 +334,8 @@ export class Viewer {
     return this.doc;
   }
 
-  get isInverted(): boolean {
-    return this.inverted;
+  get paper(): Paper {
+    return PAPERS[this.paperIndex];
   }
 
   /** Canvas size in device pixels. */
@@ -364,10 +384,8 @@ export class Viewer {
     if (this.docDirty) {
       this.docDirty = false;
       const started = performance.now();
-      if (this.doc?.kind === 'vector') {
-        this.doc.draw(this.ctx, this.view, this.inverted);
-      } else if (this.doc && width > 0 && height > 0) {
-        this.ctx.putImageData(this.doc.render(this.view, width, height, this.inverted), 0, 0);
+      if (this.doc && (this.doc.kind === 'vector' || (width > 0 && height > 0))) {
+        drawDocument(this.ctx, this.doc, this.view, width, height, this.paper);
       } else {
         this.ctx.clearRect(0, 0, width, height);
       }
