@@ -572,7 +572,7 @@ impl<'a> World<'a> {
     }
 
     /// Straight runs become paths and bulged segments arcs; segments with a width become filled
-    /// bands, mitred where they meet their neighbours, as AutoCAD draws them.
+    /// bands (see [`World::band`]).
     pub(crate) fn polyline(&mut self, verts: &[Vertex], closed: bool, m: &Affine, pen: Pen) {
         if verts.is_empty() {
             return;
@@ -596,13 +596,15 @@ impl<'a> World<'a> {
         self.path(run, m, pen);
     }
 
-    /// Segment `i` of a wide polyline as a filled outline, its ends mitred against the neighbouring segments.
+    /// Segment `i` of a wide polyline as a filled outline. AutoCAD mitres a join, straight or
+    /// curved, only where the width carries on unchanged into the neighbour; other ends are square.
     fn band(&mut self, verts: &[Vertex], closed: bool, i: usize, m: &Affine, pen: Pen) {
         let n = segment_count(verts, closed);
         let samples = segment_points(verts, i);
         let [w0, w1] = verts[i].2;
-        let prev = (i > 0 || closed).then(|| segment_points(verts, (i + n - 1) % n).last().map(|s| s.1)).flatten();
-        let next = (i + 1 < n || closed).then(|| segment_points(verts, (i + 1) % n).first().map(|s| s.1)).flatten();
+        let (before, after) = ((i + n - 1) % n, (i + 1) % n);
+        let prev = ((i > 0 || closed) && w0 != 0.0 && verts[before].2[1] == w0).then(|| segment_points(verts, before).last().map(|s| s.1)).flatten();
+        let next = ((i + 1 < n || closed) && w1 != 0.0 && verts[after].2[0] == w1).then(|| segment_points(verts, after).first().map(|s| s.1)).flatten();
         let last = samples.len().saturating_sub(1);
         let (mut left, mut right) = (Vec::new(), Vec::new());
         for (k, &(p, t)) in samples.iter().enumerate() {
@@ -2264,21 +2266,40 @@ mod tests {
     }
 
     #[test]
-    fn wide_polyline_is_mitred_bands() {
-        // Width 2 along (0,0) → (10,0) → (10,10); the last segment tapers to 0 from its own start width 4.
+    fn wide_polyline_is_mitred_where_width_carries_on() {
+        // (0,0) → (10,0) → (10,10) → (0,10): width 2, then 2 tapering to 4, then 3.
         let d = decode(&entities(&[
-            (0, "LWPOLYLINE"), (90, "3"), (70, "0"), (43, "2"),
-            (10, "0"), (20, "0"), (10, "10"), (20, "0"), (40, "4"), (41, "0"), (10, "10"), (20, "10"),
+            (0, "LWPOLYLINE"), (90, "4"), (70, "0"),
+            (10, "0"), (20, "0"), (40, "2"), (41, "2"), (10, "10"), (20, "0"), (40, "2"), (41, "4"),
+            (10, "10"), (20, "10"), (40, "3"), (41, "3"), (10, "0"), (20, "10"),
         ]))
         .unwrap();
         assert!(d.paths.is_empty() && d.arcs.is_empty());
         let world = |q: &P| [q[0] + d.origin[0], d.origin[1] - q[1]];
         let ring = |i: usize| d.fills[i].rings[0].iter().map(world).collect::<Vec<_>>();
-        // The first band ends on the bisector of the corner: (9, 1) inside, (11, -1) outside.
-        let first = ring(0);
-        assert!(close(first[0], [0.0, 1.0]) && close(first[1], [9.0, 1.0]) && close(first[2], [11.0, -1.0]) && close(first[3], [0.0, -1.0]), "{first:?}");
-        let second = ring(1);
-        assert!(close(second[0], [8.0, 2.0]) && close(second[1], [10.0, 10.0]) && close(second[3], [12.0, -2.0]), "{second:?}");
+        // Same width at the first corner: both bands end on its bisector, (9, 1) inside, (11, -1) outside.
+        let (first, second) = (ring(0), ring(1));
+        assert!(close(first[1], [9.0, 1.0]) && close(first[2], [11.0, -1.0]), "{first:?}");
+        assert!(close(second[0], [9.0, 1.0]) && close(*second.last().unwrap(), [11.0, -1.0]), "{second:?}");
+        // Width 4 meets 3 at the second corner: both ends square.
+        assert!(close(second[second.len() / 2 - 1], [8.0, 10.0]), "{second:?}");
+        assert!(close(ring(2)[0], [10.0, 8.5]), "{:?}", ring(2));
+    }
+
+    #[test]
+    fn wide_polyline_mitres_into_arcs_of_the_same_width() {
+        // Width 2 along (0,0) → (10,0), then an arc (bulge −0.5) that leaves the corner turned
+        // clockwise: mitred if the arc is 2 wide too, square at x = 10 if it is 3.
+        for (arc_width, square) in [("2", false), ("3", true)] {
+            let d = decode(&entities(&[
+                (0, "LWPOLYLINE"), (90, "3"), (70, "0"),
+                (10, "0"), (20, "0"), (40, "2"), (41, "2"), (10, "10"), (20, "0"), (42, "-0.5"), (40, arc_width), (41, arc_width), (10, "20"), (20, "0"),
+            ]))
+            .unwrap();
+            let world = |q: &P| [q[0] + d.origin[0], d.origin[1] - q[1]];
+            let first = d.fills[0].rings[0].iter().map(world).collect::<Vec<_>>();
+            assert_eq!(close(first[1], [10.0, 1.0]) && close(first[2], [10.0, -1.0]), square, "{first:?}");
+        }
     }
 
     #[test]

@@ -14,7 +14,6 @@ use acadrust::entities::*;
 use acadrust::objects::ObjectType;
 use acadrust::tables::Layer;
 use acadrust::types::{Color, Handle, LineWeight, Transparency, Vector2, Vector3};
-use acadrust::classes::DxfClass;
 use acadrust::{BlockRecord, CadDocument, DwgReader, DwgWriter, DxfReader, DxfWriter};
 
 const COLUMNS: usize = 8;
@@ -179,7 +178,7 @@ fn build(s: &mut Sheet) {
     for (name, color) in [("X_LABELS", 7), ("X_FRAMES", 8)] {
         s.layer(name, color);
     }
-    s.label("EXTRA ELEMENTS (synthetic, acadrust)", s.top_left + v(0., -40.), 12.);
+    s.label("EXTRA ELEMENTS (synthetic, acadrust)", s.top_left + v(0., 15.), 12.);
 
     // Blocks used by the insert cells.
     s.block("X_F", f_shape(Color::ByBlock));
@@ -675,12 +674,15 @@ fn main() {
     let (min, _) = (doc.header.model_space_extents_min, doc.header.model_space_extents_max);
     let mut s = Sheet { top_left: v(min.x, min.y - 100.), doc, count: 0 };
     build(&mut s);
-    // Without a WIPEOUT class the DWG writer files the wipeout under IMAGE's type code.
-    if !s.doc.classes.contains("WIPEOUT") {
-        let mut class = DxfClass::new_entity("WIPEOUT", "AcDbWipeout");
-        class.application_name = "WipeOut|AutoCAD Express Tool|expresstools@autodesk.com".into();
-        s.doc.classes.add_or_update(class);
-    }
+    // Class-based entities (WIPEOUT, HELIX, MESH, ...) need their class, or the DWG writer files
+    // them under a fallback type code that AutoCAD drops.
+    let missing: Vec<String> = ["WIPEOUT", "HELIX", "MESH", "ACAD_TABLE", "MLINE", "ARC_DIMENSION", "LARGE_RADIAL_DIMENSION", "MULTILEADER"]
+        .into_iter()
+        .filter(|c| !s.doc.classes.contains(c))
+        .map(String::from)
+        .collect();
+    s.doc.classes.update_defaults();
+    println!("classes added: {missing:?}");
     println!("{} cells, {} → {} entities", s.count, before, s.doc.entity_count());
     if dwg(output) {
         DwgWriter::write_to_file(output, &s.doc).unwrap();
