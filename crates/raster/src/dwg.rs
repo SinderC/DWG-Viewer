@@ -25,7 +25,7 @@ pub fn decode(data: &[u8]) -> Result<dxf::Drawing, String> {
         .iter()
         .map(|l| {
             let (index, rgb) = color(&l.color);
-            Layer { name: l.name.clone(), color: rgb.unwrap_or_else(|| dxf::aci(index)), visible: l.is_visible(), linetype: l.line_type.clone(), weight: l.line_weight.value() }
+            Layer { name: l.name.clone(), color: rgb.unwrap_or_else(|| dxf::aci(index)), visible: l.is_visible(), linetype: l.line_type.clone(), weight: l.line_weight.value(), transparency: dxf::transparency(l.transparency.to_dxf_value().into(), 0, 0) }
         })
         .collect();
     let units = dxf::units_name(doc.header.insertion_units.into());
@@ -68,7 +68,7 @@ fn style<'a>(w: &mut World, c: &'a EntityCommon, ctx: &Ctx<'a>) -> Option<(Paren
     }
     let own = if c.layer.is_empty() { "0" } else { c.layer.as_str() };
     let (index, rgb) = color(&c.color);
-    Some(dxf::style(w, own, rgb, index, (&c.linetype, c.linetype_scale), c.line_weight.value().into(), ctx))
+    Some(dxf::style(w, own, rgb, index, (&c.linetype, c.linetype_scale), c.line_weight.value().into(), c.transparency.to_dxf_value().into(), ctx))
 }
 
 fn xy(v: Vector3) -> P {
@@ -83,8 +83,8 @@ fn hex(h: Option<Handle>) -> Option<String> {
 /// `pen` in colour `c`, unless that is BYLAYER or BYBLOCK (the entity's own colour).
 fn recolor(c: &Color, pen: Pen) -> Pen {
     match color(c) {
-        (_, Some(rgb)) => Pen { color: rgb, ..pen },
-        (index @ 1..=255, None) => Pen { color: dxf::aci(index), ..pen },
+        (_, Some(rgb)) => Pen { color: dxf::transparency_of(pen.color, rgb), ..pen },
+        (index @ 1..=255, None) => Pen { color: dxf::transparency_of(pen.color, dxf::aci(index)), ..pen },
         _ => pen,
     }
 }

@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::f64::consts::TAU;
 
 use acadrust::entities::solid3d::AcisData;
-pub(crate) use color::aci;
+pub(crate) use color::{aci, transparency, transparency_of};
 pub use color::{BACKGROUND, FOREGROUND};
 use dim::{Dim, DimStyle, DimText};
 use parse::{Pair, Record};
@@ -370,7 +370,7 @@ impl<'a> World<'a> {
             return id;
         }
         let id = self.layers.len() as u32;
-        self.layers.push(Layer { name: name.to_string(), color, visible: true, linetype: String::new(), weight: -3 });
+        self.layers.push(Layer { name: name.to_string(), color, visible: true, linetype: String::new(), weight: -3, transparency: 0 });
         self.layer_ids.insert(key, id);
         id
     }
@@ -444,6 +444,7 @@ impl<'a> World<'a> {
             None => (false, name.as_str()),
         };
         let (c1, c2) = if inverse { (c2, c1) } else { (c1, c2) };
+        let (c1, c2) = (color::transparency_of(pen.color, c1), color::transparency_of(pen.color, c2));
         fill.gradient = Some(match base {
             "CYLINDER" => Gradient { radial: false, a: along(-reach), b: along(reach), stops: vec![(0.0, c1), (0.5, c2), (1.0, c1)] },
             "SPHERICAL" => Gradient { radial: true, a: centre, b: [centre[0] + radius, centre[1]], stops: vec![(0.0, c2), (1.0, c1)] },
@@ -1139,6 +1140,8 @@ pub struct Layer {
     pub linetype: String,
     /// Line weight in 1/100 mm, or -3 for the drawing's default.
     pub weight: i16,
+    /// 0 (opaque) to 255 (clear).
+    pub transparency: u8,
 }
 
 fn layer(r: &Record) -> Layer {
@@ -1147,7 +1150,9 @@ fn layer(r: &Record) -> Layer {
     // A negative colour index means the layer is off.
     let name = r.get(2).unwrap_or("").trim().to_string();
     let linetype = r.get(6).unwrap_or("").trim().to_string();
-    Layer { name, color: true_color(r).unwrap_or_else(|| color::aci(index.abs())), visible: index >= 0 && !frozen, linetype, weight: r.i(370, -3) as i16 }
+    // Transparency is in the AcCmTransparency XDATA.
+    let transparency = color::transparency(r.i(1071, 0), 0, 0);
+    Layer { name, color: true_color(r).unwrap_or_else(|| color::aci(index.abs())), visible: index >= 0 && !frozen, linetype, weight: r.i(370, -3) as i16, transparency }
 }
 
 fn true_color(r: &Record) -> Option<u32> {
@@ -1252,13 +1257,14 @@ impl Affine {
 }
 
 /// What an INSERT or DIMENSION passes on to its block's entities: its layer, which entities on
-/// layer 0 take on, and its colour and linetype (index), for BYBLOCK.
+/// layer 0 take on, and its colour, linetype (index), line weight and transparency, for BYBLOCK.
 #[derive(Clone, Copy)]
 pub(crate) struct Parent<'a> {
     pub layer: &'a str,
     pub color: u32,
     pub linetype: u32,
     pub weight: u8,
+    pub transparency: u8,
 }
 
 /// Inherited state while expanding blocks.
@@ -1277,8 +1283,9 @@ impl Ctx<'_> {
 /// negative BYLAYER); `true_color` overrides it. `linetype` is the entity's linetype name (empty
 /// for BYLAYER) and scale.
 /// `weight` is the entity's line weight in 1/100 mm, or -1 BYLAYER, -2 BYBLOCK, -3 the drawing's default.
+/// `transparency` is the DXF group 440 value (0 BYLAYER).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn style<'a>(w: &mut World, own: &'a str, true_color: Option<u32>, index: i64, linetype: (&str, f64), weight: i64, ctx: &Ctx<'a>) -> (Parent<'a>, Pen) {
+pub(crate) fn style<'a>(w: &mut World, own: &'a str, true_color: Option<u32>, index: i64, linetype: (&str, f64), weight: i64, transparency: i64, ctx: &Ctx<'a>) -> (Parent<'a>, Pen) {
     let name = match ctx.parent {
         Some(parent) if own == "0" => parent.layer,
         _ => own,
@@ -1290,6 +1297,8 @@ pub(crate) fn style<'a>(w: &mut World, own: &'a str, true_color: Option<u32>, in
         256.. | ..0 => by_layer.color,
         index => color::aci(index),
     });
+    let transparency = color::transparency(transparency, by_layer.transparency, ctx.parent.map_or(0, |p| p.transparency));
+    let color = color::with_transparency(color, transparency);
     let (own_linetype, scale) = linetype;
     let linetype = match own_linetype.trim().to_uppercase().as_str() {
         "" | "BYLAYER" => w.linetype_id(&by_layer.linetype),
@@ -1306,7 +1315,7 @@ pub(crate) fn style<'a>(w: &mut World, own: &'a str, true_color: Option<u32>, in
         0..=211 => weight as u8,
         _ => w.default_weight,
     };
-    (Parent { layer: name, color, linetype, weight }, Pen { color, layer, width: 0.0, dash, weight })
+    (Parent { layer: name, color, linetype, weight, transparency }, Pen { color, layer, width: 0.0, dash, weight })
 }
 
 /// Block transforms for an INSERT at `at` (after `m` and the entity's OCS `ocs`): one per cell of
@@ -1449,7 +1458,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             return;
         }
         let own = r.get(8).map_or("0", str::trim);
-        let (parent, pen) = style(&mut self.world, own, true_color(r), r.i(62, 256), (r.get(6).unwrap_or(""), r.f(48, 1.0)), r.i(370, -1), ctx);
+        let (parent, pen) = style(&mut self.world, own, true_color(r), r.i(62, 256), (r.get(6).unwrap_or(""), r.f(48, 1.0)), r.i(370, -1), r.i(440, 0), ctx);
         let (m, w) = (ctx.m, &mut self.world);
         match r.kind {
             "LINE" => w.path(vec![r.point(10), r.point(11)], &m, pen),
@@ -1464,13 +1473,13 @@ impl<'a, 'b> Builder<'a, 'b> {
                 w.ellipse(r.point(10), r.point(11), ratio, r.f(41, 0.0), r.f(42, TAU), &m, pen);
             }
             "LWPOLYLINE" => {
-                // Constant width (43) applies to vertices without their own widths (40, 41).
+                // Constant width (43) applies to vertices without their own widths (40, 41, or both 0).
                 let constant = r.f(43, 0.0);
                 let mut verts: Vec<Vertex> = Vec::new();
                 for p in r.pairs {
                     let v = || p.value.trim().parse().unwrap_or(0.0);
                     match (p.code, verts.last_mut()) {
-                        (10, _) => verts.push(([v(), 0.0], 0.0, [constant; 2])),
+                        (10, _) => verts.push(([v(), 0.0], 0.0, [0.0; 2])),
                         (20, Some(last)) => last.0[1] = v(),
                         (40, Some(last)) => last.2[0] = v(),
                         (41, Some(last)) => last.2[1] = v(),
@@ -1478,6 +1487,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                         _ => {}
                     }
                 }
+                verts.iter_mut().filter(|v| v.2 == [0.0; 2]).for_each(|v| v.2 = [constant; 2]);
                 w.polyline(&verts, r.i(70, 0) & 1 != 0, &m.then(&Affine::ocs(r)), pen);
             }
             "POLYLINE" => {
@@ -1491,7 +1501,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                     let faces: Vec<[i64; 4]> = face_records.iter().map(|v| [71, 72, 73, 74].map(|c| v.i(c, 0))).collect();
                     let pens: Vec<Pen> = face_records
                         .iter()
-                        .map(|f| style(w, f.get(8).map_or("0", str::trim), true_color(f), f.i(62, 256), (f.get(6).unwrap_or(""), f.f(48, 1.0)), f.i(370, -1), ctx).1)
+                        .map(|f| style(w, f.get(8).map_or("0", str::trim), true_color(f), f.i(62, 256), (f.get(6).unwrap_or(""), f.f(48, 1.0)), f.i(370, -1), f.i(440, 0), ctx).1)
                         .collect();
                     polyface_edges(&verts, &faces).into_iter().for_each(|(f, edge)| w.path(edge, &m, pens[f]));
                     return;
@@ -1617,7 +1627,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             }
             "MULTILEADER" | "MLEADER" => {
                 let (ml, line_color, text_color) = multileader(r);
-                let recolor = |c: Option<u32>| Pen { color: c.unwrap_or(pen.color), ..pen };
+                let recolor = |c: Option<u32>| Pen { color: c.map_or(pen.color, |c| color::transparency_of(pen.color, c)), ..pen };
                 self.multileader(&ml, m, parent, recolor(line_color), recolor(text_color), ctx);
             }
             // A dimension's lines, arrows and text are in an anonymous block, already in world
@@ -2367,6 +2377,17 @@ mod tests {
     }
 
     #[test]
+    fn constant_width_applies_to_vertices_with_zero_widths() {
+        // acadrust writes 40 and 41 as 0 on every vertex next to the constant width.
+        let d = decode(&entities(&[
+            (0, "LWPOLYLINE"), (90, "2"), (70, "0"), (43, "4"),
+            (10, "0"), (20, "0"), (40, "0"), (41, "0"), (10, "10"), (20, "0"), (40, "0"), (41, "0"),
+        ]))
+        .unwrap();
+        assert!(d.paths.is_empty() && d.fills.len() == 1);
+    }
+
+    #[test]
     fn wide_polyline_mitres_into_arcs_of_the_same_width() {
         // Width 2 along (0,0) → (10,0), then an arc (bulge −0.5) that leaves the corner turned
         // clockwise: mitred if the arc is 2 wide too, square at x = 10 if it is 3.
@@ -2411,6 +2432,30 @@ mod tests {
         let d = decode(&dxf(&g)).unwrap();
         // BYLAYER, its own, BYLAYER on a layer without one ($LWDEFAULT), BYBLOCK from the insert.
         assert_eq!(d.paths.iter().map(|p| p.weight).collect::<Vec<_>>(), [100, 50, 30, 211]);
+    }
+
+    #[test]
+    fn transparency_by_layer_by_block_and_own() {
+        let g = [
+            (0, "SECTION"), (2, "TABLES"),
+            (0, "LAYER"), (2, "Half"), (62, "7"), (1001, "AcCmTransparency"), (1071, "33554559"),
+            (0, "ENDSEC"),
+            (0, "SECTION"), (2, "BLOCKS"),
+            (0, "BLOCK"), (2, "b"), (10, "0"), (20, "0"),
+            (0, "LINE"), (8, "0"), (440, "16777216"), (10, "0"), (20, "0"), (11, "1"), (21, "0"),
+            (0, "ENDBLK"), (0, "ENDSEC"),
+            (0, "SECTION"), (2, "ENTITIES"),
+            (0, "LINE"), (8, "Half"), (10, "0"), (20, "0"), (11, "10"), (21, "0"),
+            (0, "LINE"), (8, "Half"), (440, "33554483"), (10, "0"), (20, "1"), (11, "10"), (21, "1"),
+            (0, "LINE"), (8, "0"), (10, "0"), (20, "2"), (11, "10"), (21, "2"),
+            (0, "INSERT"), (8, "0"), (440, "33554483"), (2, "b"), (10, "0"), (20, "3"),
+            (0, "ENDSEC"), (0, "EOF"),
+        ];
+        let d = decode(&dxf(&g)).unwrap();
+        // BYLAYER 50 %, its own 80 %, opaque, BYBLOCK 80 % from the insert; in 1/63 steps.
+        assert_eq!(d.paths.iter().map(|p| p.color >> 26).collect::<Vec<_>>(), [32, 51, 0, 51]);
+        assert!(d.paths.iter().all(|p| p.color & 0x3FF_FFFF == FOREGROUND));
+        assert_eq!(d.layers.iter().find(|l| l.name == "Half").map(|l| l.color), Some(FOREGROUND));
     }
 
     #[test]

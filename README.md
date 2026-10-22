@@ -74,13 +74,14 @@ If Homebrew's `rustc` shadows rustup's, put `~/.cargo/bin` first in `PATH`.
 ## Test
 
 ```sh
-cargo test                                                   # unit tests
+cargo test                                                   # unit tests, plus decoding the committed test drawing
 cargo test --release -p raster --test samples -- --ignored --nocapture   # decode everything in ./samples
 cargo run --release --example make_sample -- samples/test.cal 18000 12700 090,270   # synthetic test file
 cargo run --release --example dxf_to_dwg -- samples/in.dxf samples/out.dwg AC1018    # DWG from a DXF (acadrust)
 cargo run --release --example make_dwf -- samples                                   # synthetic DWF (classic, 6.0) and DWFx files
 cargo run --release --example make_cgm -- samples                                   # synthetic binary CGM files
 cargo run --release --example extend_baseline -- samples/in.dwg samples/out.dwg      # copy of a DXF/DWG plus a grid of extra entity types
+cargo run --release --example make_baseline -- crates/raster/tests/fixtures         # the test drawing (DXF + DWG) the fixture test decodes
 ```
 
 ## Layout
