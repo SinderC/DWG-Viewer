@@ -1466,25 +1466,52 @@ pub(crate) fn spline_points(degree: usize, ctrl: &[P], knots: &[f64], weights: &
     out
 }
 
-/// A Catmull-Rom curve through `points`: close to, but not the same as, the cubic AutoCAD fits.
+/// The C2 cubic through `points`, parameterised by chord length with natural ends, as AutoCAD
+/// fits a spline with no end tangents.
 fn through(points: &[P]) -> Vec<P> {
-    if points.len() < 3 {
-        return points.to_vec();
+    // Repeated points have no chord to parameterise by.
+    let mut points = points.to_vec();
+    points.dedup();
+    let n = points.len();
+    if n < 3 {
+        return points;
     }
-    let at = |i: usize| points[i.min(points.len() - 1)];
+    let h: Vec<f64> = points.windows(2).map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1])).collect();
+    // Tangents (dP/dt) at the points, from the tridiagonal system of C2 continuity (Thomas algorithm).
+    let (mut b, mut c, mut d) = (vec![0.0; n], vec![0.0; n], vec![[0.0; 2]; n]);
+    let slope = |i: usize, k: usize| (points[i + 1][k] - points[i][k]) / h[i];
+    for k in 0..2 {
+        d[0][k] = 3.0 * slope(0, k);
+        d[n - 1][k] = 3.0 * slope(n - 2, k);
+        for i in 1..n - 1 {
+            d[i][k] = 3.0 * (h[i] * slope(i - 1, k) + h[i - 1] * slope(i, k));
+        }
+    }
+    let a = |i: usize| if i == n - 1 { 1.0 } else { h[i] };
+    (b[0], c[0]) = (2.0, 1.0);
+    for i in 1..n {
+        let (bi, ci) = if i == n - 1 { (2.0, 0.0) } else { (2.0 * (h[i - 1] + h[i]), h[i - 1]) };
+        let m = a(i) / b[i - 1];
+        b[i] = bi - m * c[i - 1];
+        c[i] = ci;
+        d[i] = [d[i][0] - m * d[i - 1][0], d[i][1] - m * d[i - 1][1]];
+    }
+    let mut tan = vec![[0.0; 2]; n];
+    tan[n - 1] = [d[n - 1][0] / b[n - 1], d[n - 1][1] / b[n - 1]];
+    for i in (0..n - 1).rev() {
+        tan[i] = [(d[i][0] - c[i] * tan[i + 1][0]) / b[i], (d[i][1] - c[i] * tan[i + 1][1]) / b[i]];
+    }
     let mut out = Vec::new();
-    for i in 0..points.len() - 1 {
-        let (p0, p1, p2, p3) = (at(i.saturating_sub(1)), at(i), at(i + 1), at(i + 2));
+    for i in 0..n - 1 {
         out.extend((0..SPLINE_STEPS).map(|s| {
             let t = s as f64 / SPLINE_STEPS as f64;
-            let c = |k: usize| {
-                let (a, b, c, d) = (p0[k], p1[k], p2[k], p3[k]);
-                0.5 * (2.0 * b + (c - a) * t + (2.0 * a - 5.0 * b + 4.0 * c - d) * t * t + (3.0 * b - a - 3.0 * c + d) * t * t * t)
-            };
+            let (t2, t3) = (t * t, t * t * t);
+            let (h00, h10, h01, h11) = (2.0 * t3 - 3.0 * t2 + 1.0, t3 - 2.0 * t2 + t, 3.0 * t2 - 2.0 * t3, t3 - t2);
+            let c = |k: usize| h00 * points[i][k] + h[i] * (h10 * tan[i][k] + h11 * tan[i + 1][k]) + h01 * points[i + 1][k];
             [c(0), c(1)]
         }));
     }
-    out.push(points[points.len() - 1]);
+    out.push(points[n - 1]);
     out
 }
 
