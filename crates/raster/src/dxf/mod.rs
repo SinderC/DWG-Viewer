@@ -1212,8 +1212,8 @@ impl<'a, 'b> Builder<'a, 'b> {
             }
             // A dimension's lines, arrows and text are in an anonymous block, already in world coordinates.
             "DIMENSION" => self.expand(&r.name(2), m, parent, ctx),
-            "REGION" => {
-                // SAT text (encoded) before R2013, then SAB data in the ACDSDATA section.
+            // ACIS bodies: SAT text (encoded) before R2013, then SAB data in the ACDSDATA section.
+            "REGION" | "3DSOLID" | "BODY" => {
                 let sat: String = r.pairs.iter().filter(|p| matches!(p.code, 1 | 3)).map(|p| if p.code == 1 { format!("{}\n", p.value) } else { p.value.to_string() }).collect();
                 let sab = self.acis.get(&r.name(5)).map_or(&[][..], Vec::as_slice);
                 for edge in acis::read(&AcisData::decode_sat(&sat), sab).as_ref().map(acis::edges).unwrap_or_default() {
@@ -1906,6 +1906,23 @@ mod tests {
             (0, "SECTION"), (2, "ACDSDATA"), (0, "ACDSRECORD"), (320, "2A"), (2, "ASM_Data"), (310, &hex), (0, "ENDSEC"), (0, "EOF"),
         ]))
         .unwrap()
+    }
+
+    #[test]
+    fn solid_edges_placed_by_body_transform() {
+        use acadrust::entities::acis::{SatDocument, SatPointer, Sense};
+        // One edge from (0, 0, 5) to (1, 0, 5), rotated a quarter turn about Z and moved by (10, 20).
+        let mut body = SatDocument::new_body();
+        let ptr = |i: i32| SatPointer::new(i);
+        let (a, b) = (body.add_point(0.0, 0.0, 5.0), body.add_point(1.0, 0.0, 5.0));
+        let (va, vb) = (body.add_vertex(SatPointer::NULL, ptr(a)), body.add_vertex(SatPointer::NULL, ptr(b)));
+        let line = body.add_straight_curve([0.0, 0.0, 5.0], [1.0, 0.0, 0.0]);
+        body.add_edge(ptr(va), 0.0, ptr(vb), 1.0, SatPointer::NULL, ptr(line), Sense::Forward);
+        body.set_placement([[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]], [10.0, 20.0, 0.0], 1.0);
+        let d = acis_dxf("3DSOLID", &body);
+        // World (10, 20)–(10, 21): vertical, drawn y down from the top of the extents.
+        let p = &d.paths[0].points;
+        assert!(close(p[0], [0.0, 1.0]) && close(p[1], [0.0, 0.0]), "{p:?}");
     }
 
     #[test]
