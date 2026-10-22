@@ -10,6 +10,7 @@
 
 pub(crate) mod acis;
 mod color;
+pub(crate) mod dim;
 pub(crate) mod parse;
 pub(crate) mod shapes;
 
@@ -19,6 +20,7 @@ use std::f64::consts::TAU;
 use acadrust::entities::solid3d::AcisData;
 pub(crate) use color::aci;
 pub use color::{BACKGROUND, FOREGROUND};
+use dim::{Dim, DimStyle, DimText};
 use parse::{Pair, Record};
 
 use crate::tiff::Image;
@@ -77,6 +79,8 @@ pub struct Text {
     pub wrap: f64,
     /// Font family and style: `FONT_SANS`, `FONT_SERIF` or `FONT_MONO`, plus `FONT_ITALIC` and `FONT_BOLD`.
     pub font: u8,
+    /// Background mask: its colour and how far it reaches beyond the text, in drawing units.
+    pub mask: Option<(u32, f64)>,
 }
 
 pub const FONT_SANS: u8 = 0;
@@ -101,6 +105,18 @@ pub struct Fill {
     pub color: u32,
     /// Index into `Drawing::layers`.
     pub layer: u32,
+    /// Drawn over the lines (a WIPEOUT) instead of under them.
+    pub mask: bool,
+    /// Filled with this instead of `color`.
+    pub gradient: Option<Gradient>,
+}
+
+/// A gradient fill: linear from `a` to `b`, or radial about `a` out to `b`, with colour stops (offset 0–1, colour).
+pub struct Gradient {
+    pub radial: bool,
+    pub a: P,
+    pub b: P,
+    pub stops: Vec<(f64, u32)>,
 }
 
 /// A raster image placed in the drawing: `pos` is its top-left corner, `px` the size of a pixel in drawing units.
@@ -203,11 +219,11 @@ pub fn decode(data: &[u8]) -> Result<Drawing, String> {
     info.extend(header_var(header, "$DWGCODEPAGE").map(|v| ("Code page".to_string(), v.to_string())));
     info.extend(summary(units, &layers, blocks.keys().map(String::as_str), model_space));
 
-    // Leader arrow sizes: DIMASZ × DIMSCALE of each dimension style, or of the header.
-    let header_f = |name: &str, default: f64| header_var(header, name).and_then(|v| v.parse().ok()).unwrap_or(default);
-    let (dimasz, dimscale) = (header_f("$DIMASZ", 0.18), header_f("$DIMSCALE", 1.0));
-    let arrow_sizes = dimstyles.iter().map(|r| (r.name(2), arrow_size(r.f(41, dimasz), r.f(40, dimscale)))).collect();
-    let mut b = Builder { blocks: &blocks, world: World::new(layers), arrow_sizes, arrow_size: arrow_size(dimasz, dimscale), acis };
+    // Dimension styles over the header's dimension variables, which also cover styles not listed.
+    let header_dim = |code: i32| DIM_VARS.iter().find(|v| v.0 == code).and_then(|v| header_var(header, v.1)).and_then(|v| v.parse().ok());
+    let dim_style = DimStyle::from_codes(header_dim, header_var(header, "$DIMPOST"), &DimStyle::default());
+    let dim_styles = dimstyles.iter().map(|r| (r.name(2), DimStyle::from_codes(|code| r.get(code).and_then(|v| v.trim().parse().ok()), r.get(3), &dim_style))).collect();
+    let mut b = Builder { blocks: &blocks, world: World::new(layers), dim_styles, dim_style, acis };
     let ltscale = header_var(header, "$LTSCALE").and_then(|v| v.parse().ok()).unwrap_or(1.0);
     // Shape files of the text styles, by upper-case handle.
     let shape_files: HashMap<String, &str> = styles.iter().map(|r| (r.name(5), r.get(3).unwrap_or(""))).collect();
@@ -378,8 +394,56 @@ impl<'a> World<'a> {
     pub(crate) fn fill(&mut self, rings: Vec<Vec<P>>, even_odd: bool, m: &Affine, pen: Pen) {
         let rings: Vec<Vec<P>> = rings.into_iter().filter(|r| r.len() >= 3).map(|r| r.into_iter().map(|p| m.apply(p)).collect()).collect();
         if !rings.is_empty() {
-            self.fills.push(Fill { rings, even_odd, color: pen.color, layer: pen.layer });
+            self.fills.push(Fill { rings, even_odd, color: pen.color, layer: pen.layer, mask: false, gradient: None });
         }
+    }
+
+    /// A SOLID or TRACE: corners in zig-zag order (the fourth equal to the third for a triangle), filled.
+    pub(crate) fn solid(&mut self, [a, b, c, d]: [P; 4], m: &Affine, pen: Pen) {
+        self.fill(vec![vec![a, b, d, c]], false, m, pen);
+    }
+
+    /// A WIPEOUT: `ring` filled with the paper colour over the lines drawn so far.
+    pub(crate) fn wipeout(&mut self, ring: Vec<P>, m: &Affine, layer: u32) {
+        let pen = Pen { color: BACKGROUND, layer, width: 0.0, dash: 0 };
+        self.fill(vec![ring], false, m, pen);
+        if let Some(f) = self.fills.last_mut() {
+            f.mask = true;
+        }
+    }
+
+    /// A gradient-filled hatch: AutoCAD gradient `name` at `angle` from `c1` to `c2`, over the bounding box of `rings`.
+    pub(crate) fn gradient(&mut self, rings: Vec<Vec<P>>, name: &str, angle: f64, c1: u32, c2: u32, m: &Affine, pen: Pen) {
+        self.fill(rings, true, m, pen);
+        let Some(fill) = self.fills.last_mut() else { return };
+        let (mut lo, mut hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
+        for p in fill.rings.iter().flatten() {
+            for k in 0..2 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k]);
+            }
+        }
+        let centre = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0];
+        let radius = (hi[0] - lo[0]).hypot(hi[1] - lo[1]) / 2.0;
+        let d = m.linear([angle.cos(), angle.sin()]);
+        let d = [d[0] / d[0].hypot(d[1]).max(f64::MIN_POSITIVE), d[1] / d[0].hypot(d[1]).max(f64::MIN_POSITIVE)];
+        // The box's extent along the gradient direction, about its centre.
+        let reach = ((hi[0] - lo[0]) * d[0].abs() + (hi[1] - lo[1]) * d[1].abs()) / 2.0;
+        let along = |t: f64| [centre[0] + d[0] * t, centre[1] + d[1] * t];
+        let name = name.trim().to_uppercase();
+        let (inverse, base) = match name.strip_prefix("INV") {
+            Some(base) => (true, base),
+            None => (false, name.as_str()),
+        };
+        let (c1, c2) = if inverse { (c2, c1) } else { (c1, c2) };
+        fill.gradient = Some(match base {
+            "CYLINDER" => Gradient { radial: false, a: along(-reach), b: along(reach), stops: vec![(0.0, c1), (0.5, c2), (1.0, c1)] },
+            "SPHERICAL" => Gradient { radial: true, a: centre, b: [centre[0] + radius, centre[1]], stops: vec![(0.0, c2), (1.0, c1)] },
+            // Lit from below the middle of the side opposite the gradient direction.
+            "HEMISPHERICAL" => Gradient { radial: true, a: along(-reach), b: along(reach), stops: vec![(0.0, c2), (1.0, c1)] },
+            "CURVED" => Gradient { radial: false, a: along(-reach), b: along(reach), stops: vec![(0.0, c2), (0.3, c2), (1.0, c1)] },
+            _ => Gradient { radial: false, a: along(-reach), b: along(reach), stops: vec![(0.0, c1), (1.0, c2)] },
+        });
     }
 
     /// A hatch over the even-odd area of `rings`: filled if `pattern` is None, otherwise drawn as
@@ -436,7 +500,7 @@ impl<'a> World<'a> {
     /// units (tip at the origin, pointing along +X, size 1) and its block, for the caller to draw.
     pub(crate) fn multileader(&mut self, ml: &MultiLeader, m: &Affine, line: Pen, text: Pen) -> Vec<(Affine, Option<String>)> {
         if let Some(t) = &ml.text {
-            self.push_text(t.at, t.angle, t.height, 1.0, mtext_align(1 + t.column as i64), parse::mtext_plain(&t.value), m, text);
+            self.push_text(t.at, t.angle, t.height, 1.0, mtext_align(1 + t.column as i64), parse::mtext_rich(&t.value, t.height), m, text);
         }
         let mut arrows = Vec::new();
         for root in &ml.roots {
@@ -581,8 +645,20 @@ impl<'a> World<'a> {
             let len = |v: P| v[0].hypot(v[1]);
             let scale = if len(x) > 0.0 { len(m.linear(x)) / len(x) } else { 0.0 };
             let (fit, wrap) = (style.fit * scale, style.wrap * scale);
-            let text = Text { pos: m.apply(pos), x: m.linear(x), up: m.linear(up), halign, valign, text, color: pen.color, layer: pen.layer, fit, wrap, font: style.font };
+            let text = Text { pos: m.apply(pos), x: m.linear(x), up: m.linear(up), halign, valign, text, color: pen.color, layer: pen.layer, fit, wrap, font: style.font, mask: None };
             self.texts.push(text);
+        }
+    }
+
+    pub(crate) fn text_count(&self) -> usize {
+        self.texts.len()
+    }
+
+    /// Gives the texts added since there were `start` a background mask of `color`, reaching
+    /// `margin` (in the units before `m`) beyond them.
+    pub(crate) fn mask_texts(&mut self, start: usize, color: u32, margin: f64, m: &Affine) {
+        for t in self.texts.iter_mut().skip(start) {
+            t.mask = Some((color, margin * m.length_scale()));
         }
     }
 
@@ -617,7 +693,15 @@ impl<'a> World<'a> {
             paths: self.paths.into_iter().map(|p| Path { points: p.points.into_iter().map(pt).collect(), ..p }).collect(),
             arcs: self.arcs.into_iter().map(|a| Arc { centre: pt(a.centre), u: vec(a.u), v: vec(a.v), ..a }).collect(),
             texts: self.texts.into_iter().map(|t| Text { pos: pt(t.pos), x: vec(t.x), up: vec(t.up), ..t }).collect(),
-            fills: self.fills.into_iter().map(|f| Fill { rings: f.rings.into_iter().map(|r| r.into_iter().map(pt).collect()).collect(), ..f }).collect(),
+            fills: self
+                .fills
+                .into_iter()
+                .map(|f| Fill {
+                    rings: f.rings.into_iter().map(|r| r.into_iter().map(pt).collect()).collect(),
+                    gradient: f.gradient.map(|g| Gradient { a: pt(g.a), b: pt(g.b), ..g }),
+                    ..f
+                })
+                .collect(),
             images: self.images.into_iter().map(|i| PlacedImage { pos: pt(i.pos), ..i }).collect(),
             dashes: self.dashes,
             background: self.page.map(|(a, b, color)| Background {
@@ -1204,12 +1288,95 @@ pub(crate) fn mtext_align(attach: i64) -> (u8, u8) {
     ((attach % 3) as u8, [3, 2, 1][attach as usize / 3])
 }
 
+/// DIMSTYLE group codes and the header variables with the same meaning.
+const DIM_VARS: [(i32, &str); 13] = [
+    (41, "$DIMASZ"),
+    (140, "$DIMTXT"),
+    (42, "$DIMEXO"),
+    (44, "$DIMEXE"),
+    (147, "$DIMGAP"),
+    (77, "$DIMTAD"),
+    (73, "$DIMTIH"),
+    (144, "$DIMLFAC"),
+    (271, "$DIMDEC"),
+    (179, "$DIMADEC"),
+    (78, "$DIMZIN"),
+    (278, "$DIMDSEP"),
+    (40, "$DIMSCALE"),
+];
+
+/// Mirrors text at `at` along its baseline (at `rotation`) for TEXT generation flag 2 (backward),
+/// and across it for 4 (upside down).
+pub(crate) fn text_mirror(flags: i64, at: P, rotation: f64) -> Affine {
+    let flip = |bit: i64| if flags & bit != 0 { -1.0 } else { 1.0 };
+    let turn = Affine::translate(at).then(&Affine::rotate(rotation));
+    let back = Affine::rotate(-rotation).then(&Affine::translate([-at[0], -at[1]]));
+    turn.then(&Affine::scale(flip(2), flip(4))).then(&back)
+}
+
+/// Unique edges of polyface `faces` (1-based vertex indices into `verts`, 0 for none; a negative
+/// index hides the edge that starts there), as two-point paths.
+pub(crate) fn polyface_edges(verts: &[P], faces: &[[i64; 4]]) -> Vec<Vec<P>> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for face in faces {
+        let idx: Vec<i64> = face.iter().copied().filter(|&i| i != 0).collect();
+        for k in 0..idx.len() {
+            let (a, b) = (idx[k], idx[(k + 1) % idx.len()]);
+            let (Some(&p), Some(&q)) = (verts.get(a.unsigned_abs() as usize - 1), verts.get(b.unsigned_abs() as usize - 1)) else { continue };
+            if a > 0 && seen.insert((a.abs().min(b.abs()), a.abs().max(b.abs()))) {
+                out.push(vec![p, q]);
+            }
+        }
+    }
+    out
+}
+
+/// The lines of an `m` × `n` polygon mesh (vertices row by row), closed in M and N as flagged.
+pub(crate) fn mesh_grid(verts: &[P], m: usize, n: usize, closed_m: bool, closed_n: bool) -> Vec<Vec<P>> {
+    if m == 0 || n == 0 || verts.len() < m * n {
+        return Vec::new();
+    }
+    let at = |i: usize, j: usize| verts[i * n + j];
+    let rows = (0..m).map(|i| (0..n).chain(closed_n.then_some(0)).map(|j| at(i, j)).collect());
+    let cols = (0..n).map(|j| (0..m).chain(closed_m.then_some(0)).map(|i| at(i, j)).collect());
+    rows.chain(cols).collect()
+}
+
+/// A WIPEOUT's boundary in world coordinates: `origin`, pixel vectors `u` and `v`, size in pixels,
+/// and clip points in pixel coordinates (from the top left), two of them for a rectangle.
+pub(crate) fn wipeout_ring(origin: P, u: P, v: P, size: P, clip: &[P]) -> Vec<P> {
+    let corner = [origin[0] + u[0] * 0.5 - v[0] * 0.5, origin[1] + u[1] * 0.5 - v[1] * 0.5];
+    let world = |p: P| [corner[0] + u[0] * p[0] + v[0] * (size[1] - p[1]), corner[1] + u[1] * p[0] + v[1] * (size[1] - p[1])];
+    let pixels = match clip {
+        [a, b] => vec![*a, [b[0], a[1]], *b, [a[0], b[1]]],
+        [] => vec![[-0.5, -0.5], [size[0] - 0.5, -0.5], [size[0] - 0.5, size[1] - 0.5], [-0.5, size[1] - 0.5]],
+        _ => clip.to_vec(),
+    };
+    pixels.into_iter().map(world).collect()
+}
+
+/// The two colours of a gradient: its own, or for a one-colour gradient the first and its tint
+/// (0 dark to 1 light) toward black or white.
+pub(crate) fn gradient_colors(colors: &[u32], one_color: bool, tint: f64) -> Option<(u32, u32)> {
+    let c1 = *colors.first()?;
+    if !one_color && colors.len() > 1 {
+        return Some((c1, colors[1]));
+    }
+    let (toward, k) = if tint >= 0.5 { (255.0, (tint - 0.5) * 2.0) } else { (0.0, (0.5 - tint) * 2.0) };
+    let mix = |shift: u32| {
+        let c = ((c1 >> shift) & 255) as f64;
+        ((c + (toward - c) * k).round() as u32) << shift
+    };
+    Some((c1, mix(16) | mix(8) | mix(0)))
+}
+
 struct Builder<'a, 'b> {
     blocks: &'b HashMap<String, Block<'a>>,
     world: World<'a>,
-    /// Leader arrow size by upper-case dimension style name, and for styles not listed.
-    arrow_sizes: HashMap<String, f64>,
-    arrow_size: f64,
+    /// Dimension styles by upper-case name, and for dimensions whose style is not listed.
+    dim_styles: HashMap<String, DimStyle>,
+    dim_style: DimStyle,
     /// SAB data of ACIS entities (R2013+), by upper-case entity handle.
     acis: HashMap<String, Vec<u8>>,
 }
@@ -1255,8 +1422,19 @@ impl<'a, 'b> Builder<'a, 'b> {
             }
             "POLYLINE" => {
                 let flags = r.i(70, 0);
-                // Polygon and polyface meshes (16, 64) are 3D; not drawn.
-                if flags & (16 | 64) != 0 {
+                let vertices = e.children.iter().filter(|v| v.kind == "VERTEX");
+                // Polyface mesh: vertices (flag 64) and faces (128 alone) listing up to four 1-based vertex indices.
+                if flags & 64 != 0 {
+                    let verts: Vec<P> = vertices.clone().filter(|v| v.i(70, 0) & 64 != 0).map(|v| v.point(10)).collect();
+                    let faces: Vec<[i64; 4]> = vertices.filter(|v| v.i(70, 0) & 192 == 128).map(|v| [71, 72, 73, 74].map(|c| v.i(c, 0))).collect();
+                    polyface_edges(&verts, &faces).into_iter().for_each(|edge| w.path(edge, &m, pen));
+                    return;
+                }
+                // Polygon mesh: M × N vertices (71, 72), closed in M (flag 1) and N (32).
+                if flags & 16 != 0 {
+                    let verts: Vec<P> = vertices.map(|v| v.point(10)).collect();
+                    let (rows, cols) = (r.i(71, 0).max(0) as usize, r.i(72, 0).max(0) as usize);
+                    mesh_grid(&verts, rows, cols, flags & 1 != 0, flags & 32 != 0).into_iter().for_each(|line| w.path(line, &m, pen));
                     return;
                 }
                 // Spline frame control points (vertex flag 16) are not part of the curve.
@@ -1270,37 +1448,71 @@ impl<'a, 'b> Builder<'a, 'b> {
             "SOLID" | "TRACE" => {
                 let c = r.point(12);
                 let d = if r.get(13).is_some() { r.point(13) } else { c };
-                w.path(vec![r.point(10), r.point(11), d, c, r.point(10)], &m.then(&Affine::ocs(r)), pen);
+                w.solid([r.point(10), r.point(11), c, d], &m.then(&Affine::ocs(r)), pen);
             }
             "3DFACE" => {
                 let pts = [10, 11, 12, 13, 10].map(|code| r.point(code));
                 w.path(pts.to_vec(), &m, pen);
             }
             "SPLINE" => w.path(spline(r), &m, pen),
+            // A helix is its spline, which comes before the AcDbHelix groups (whose 10 is the axis base point).
+            "HELIX" => {
+                let end = r.pairs.iter().position(|p| p.code == 100 && p.value.trim() == "AcDbHelix").unwrap_or(r.pairs.len());
+                w.path(spline(&Record { kind: r.kind, pairs: &r.pairs[..end] }), &m, pen);
+            }
+            "MESH" => {
+                let (verts, faces) = subd_mesh(r);
+                polyface_edges(&verts, &faces).into_iter().for_each(|edge| w.path(edge, &m, pen));
+            }
+            "MLINE" => mline(r).into_iter().for_each(|line| w.path(line, &m, pen)),
+            "WIPEOUT" => {
+                let clip: Vec<P> = r.pairs.iter().filter(|p| p.code == 14).zip(r.pairs.iter().filter(|p| p.code == 24)).map(|(x, y)| [x.value.trim().parse().unwrap_or(0.0), y.value.trim().parse().unwrap_or(0.0)]).collect();
+                w.wipeout(wipeout_ring(r.point(10), r.point(11), r.point(12), r.point(13), &clip), &m, pen.layer);
+            }
+            "TOLERANCE" => {
+                let dir = if r.get(11).is_some() { r.point(11) } else { [1.0, 0.0] };
+                let style = self.dim_styles.get(&r.name(3)).unwrap_or(&self.dim_style).scaled();
+                dim::tolerance(w, r.point(10), dir, r.get(1).unwrap_or(""), &style, &m, pen);
+            }
+            // A table's graphics are an anonymous block, placed like an INSERT along its direction (11).
+            "ACAD_TABLE" => {
+                let dir = if r.get(11).is_some() { r.point(11) } else { [1.0, 0.0] };
+                let at = m.then(&Affine::translate(r.point(10))).then(&Affine::rotate(dir[1].atan2(dir[0])));
+                self.expand(&r.name(2), at, parent, ctx);
+            }
             "RAY" | "XLINE" => w.ray(r.point(10), r.point(11), r.kind == "XLINE", &m, pen),
             "LEADER" => {
                 let points = r.pairs.iter().filter(|p| p.code == 10).zip(r.pairs.iter().filter(|p| p.code == 20));
                 let points = points.map(|(x, y)| [x.value.trim().parse().unwrap_or(0.0), y.value.trim().parse().unwrap_or(0.0)]).collect();
                 // Vertices are in world coordinates. Arrowhead flag 71 (default on); path type 72: 1 is a spline.
-                let size = if r.i(71, 1) == 0 { 0.0 } else { self.arrow_sizes.get(&r.name(3)).copied().unwrap_or(self.arrow_size) };
+                let size = if r.i(71, 1) == 0 { 0.0 } else { self.dim_styles.get(&r.name(3)).unwrap_or(&self.dim_style).scaled().arrow };
                 w.leader(points, r.i(72, 0) == 1, size, &m, pen);
             }
             "HATCH" => {
                 let (rings, pattern) = hatch(r);
-                // A gradient (450 = 1) is filled with its first colour.
-                let gradient = r.pairs.iter().skip_while(|p| p.code != 450).find(|p| p.code == 421).filter(|_| r.i(450, 0) == 1);
-                let pen = match gradient.and_then(|p| p.value.trim().parse::<i64>().ok()) {
-                    Some(rgb) => Pen { color: rgb as u32 & 0xFF_FFFF, ..pen },
-                    None => pen,
-                };
-                w.hatch(rings, pattern.as_deref(), &m.then(&Affine::ocs(r)), pen);
+                let ocs = m.then(&Affine::ocs(r));
+                match gradient(r) {
+                    Some((name, angle, c1, c2)) => w.gradient(rings, &name, angle, c1, c2, &ocs, pen),
+                    None => w.hatch(rings, pattern.as_deref(), &ocs, pen),
+                }
             }
-            "TEXT" | "ATTRIB" => {
-                // ATTRIB keeps its vertical alignment in 74; TEXT in 73.
-                let valign = r.i(if r.kind == "ATTRIB" { 74 } else { 73 }, 0);
+            // An ATTDEF shows its tag outside blocks; inside one, only a constant one (flag 2) shows, its value.
+            "TEXT" | "ATTRIB" | "ATTDEF" => {
+                let value = match r.kind {
+                    "ATTDEF" if ctx.depth == 0 => r.get(2),
+                    "ATTDEF" if r.i(70, 0) & 2 != 0 => r.get(1),
+                    "ATTDEF" => return,
+                    _ => r.get(1),
+                };
+                // Attribute flag 1: invisible. Attributes keep their vertical alignment in 74; TEXT in 73.
+                if r.kind != "TEXT" && r.i(70, 0) & 1 != 0 {
+                    return;
+                }
+                let valign = r.i(if r.kind == "TEXT" { 73 } else { 74 }, 0);
                 let (pos, rotation, align) = text_anchor(r.i(72, 0), valign, r.point(10), r.point(11), r.f(50, 0.0).to_radians());
-                let string = parse::text_codes(r.get(1).unwrap_or(""));
-                w.push_text(pos, rotation, r.f(40, 1.0), r.f(41, 1.0), align, string, &m.then(&Affine::ocs(r)), pen);
+                let string = parse::text_rich(value.unwrap_or(""));
+                let m = m.then(&Affine::ocs(r)).then(&text_mirror(r.i(71, 0), pos, rotation));
+                w.push_text(pos, rotation, r.f(40, 1.0), r.f(41, 1.0), align, string, &m, pen);
             }
             "MTEXT" => {
                 // Long text is split into 250-character chunks in code 3, followed by the tail in code 1.
@@ -1313,7 +1525,14 @@ impl<'a, 'b> Builder<'a, 'b> {
                     None => r.f(50, 0.0),
                 };
                 let align = mtext_align(r.i(71, 1));
-                w.mtext(r.point(10), rotation, r.f(40, 1.0), r.f(41, 0.0), align, parse::mtext_plain(&raw), &m, pen);
+                let start = w.text_count();
+                w.mtext(r.point(10), rotation, r.f(40, 1.0), r.f(41, 0.0), align, parse::mtext_rich(&raw, r.f(40, 1.0)), &m, pen);
+                // Background mask (90): flag 1 in its own colour (63, 421), 2 in the paper's; 45 sizes it in text heights.
+                let flags = r.i(90, 0);
+                if flags & 3 != 0 {
+                    let color = if flags & 2 != 0 { BACKGROUND } else { true_color(r).unwrap_or_else(|| color::aci(r.i(63, 7))) };
+                    w.mask_texts(start, color, (r.f(45, 1.5) - 1.0) * r.f(40, 1.0), &m);
+                }
             }
             "INSERT" => {
                 let Some(block) = self.blocks.get(&r.name(2)) else { return };
@@ -1335,8 +1554,18 @@ impl<'a, 'b> Builder<'a, 'b> {
                 let recolor = |c: Option<u32>| Pen { color: c.unwrap_or(pen.color), ..pen };
                 self.multileader(&ml, m, parent, recolor(line_color), recolor(text_color), ctx);
             }
-            // A dimension's lines, arrows and text are in an anonymous block, already in world coordinates.
-            "DIMENSION" => self.expand(&r.name(2), m, parent, ctx),
+            // A dimension's lines, arrows and text are in an anonymous block, already in world
+            // coordinates. Without one it is drawn from its definition points.
+            "DIMENSION" | "ARC_DIMENSION" | "LARGE_RADIAL_DIMENSION" => {
+                let name = r.name(2);
+                if self.blocks.get(&name).is_some_and(|b| !b.entities.is_empty()) {
+                    return self.expand(&name, m, parent, ctx);
+                }
+                let Some(d) = dimension(r) else { return };
+                let text = DimText { user: r.get(1).unwrap_or(""), at: r.get(11).map(|_| r.point(11)), rotation: r.get(53).map(|_| r.f(53, 0.0).to_radians()).filter(|&a| a != 0.0) };
+                let style = self.dim_styles.get(&r.name(3)).unwrap_or(&self.dim_style).scaled();
+                dim::draw(w, &d, &text, &style, &m, pen);
+            }
             // ACIS bodies: SAT text (encoded) before R2013, then SAB data in the ACDSDATA section.
             "REGION" | "3DSOLID" | "BODY" => {
                 let sat: String = r.pairs.iter().filter(|p| matches!(p.code, 1 | 3)).map(|p| if p.code == 1 { format!("{}\n", p.value) } else { p.value.to_string() }).collect();
@@ -1345,8 +1574,6 @@ impl<'a, 'b> Builder<'a, 'b> {
                     w.path(edge, &m, pen);
                 }
             }
-            // Attribute definitions show as ATTRIBs on the INSERT instead.
-            "ATTDEF" => {}
             kind => w.skip(kind),
         }
     }
@@ -1473,6 +1700,107 @@ impl Cursor<'_, '_> {
         self.i += self.pairs[self.i..].iter().position(|p| p.code == code)?;
         self.take(code)
     }
+}
+
+/// A dimension's geometry from its definition points; None for an unknown type.
+fn dimension(r: &Record) -> Option<Dim> {
+    let p = |code| r.point(code);
+    Some(match r.kind {
+        "ARC_DIMENSION" => Dim::ArcLength { centre: p(15), a: p(13), b: p(14), arc: p(10) },
+        "LARGE_RADIAL_DIMENSION" => Dim::Jogged { centre: p(10), chord: p(13), shown_centre: p(14), jog: p(15) },
+        // Dimension type, the low bits of 70; 64 marks an X ordinate.
+        _ => match r.i(70, 0) & 7 {
+            0 => Dim::Linear { ext1: p(13), ext2: p(14), line: p(10), angle: Some(r.f(50, 0.0).to_radians()) },
+            1 => Dim::Linear { ext1: p(13), ext2: p(14), line: p(10), angle: None },
+            2 => Dim::Angular2 { l1: [p(13), p(14)], l2: [p(15), p(10)], arc: p(16) },
+            3 => Dim::Diameter { a: p(15), b: p(10) },
+            4 => Dim::Radius { centre: p(10), on_curve: p(15) },
+            5 => Dim::Angular3 { vertex: p(15), a: p(13), b: p(14), arc: p(10) },
+            6 => Dim::Ordinate { origin: p(10), feature: p(13), leader: p(14), x: r.i(70, 0) & 64 != 0 },
+            _ => return None,
+        },
+    })
+}
+
+/// A HATCH's gradient (450 = 1): its name, angle and two colours.
+fn gradient(r: &Record) -> Option<(String, f64, u32, u32)> {
+    if r.i(450, 0) != 1 {
+        return None;
+    }
+    let start = r.pairs.iter().position(|p| p.code == 450)?;
+    // Each colour starts with a 463 group, then an ACI (63) and usually a true colour (421).
+    let mut colors: Vec<u32> = Vec::new();
+    for p in &r.pairs[start..] {
+        let v = p.value.trim();
+        match p.code {
+            463 => colors.push(FOREGROUND),
+            63 => colors.last_mut().into_iter().for_each(|c| *c = color::aci(v.parse().unwrap_or(7))),
+            421 => colors.last_mut().into_iter().for_each(|c| *c = v.parse::<i64>().map_or(*c, |rgb| rgb as u32 & 0xFF_FFFF)),
+            _ => {}
+        }
+    }
+    let after = Record { kind: r.kind, pairs: &r.pairs[start..] };
+    let (c1, c2) = gradient_colors(&colors, after.i(452, 0) != 0, after.f(462, 0.0))?;
+    Some((after.get(470).unwrap_or("LINEAR").trim().to_string(), after.f(460, 0.0), c1, c2))
+}
+
+/// A MESH's level-0 vertices and faces (as 1-based indices, for `polyface_edges`; faces of more than four sides are split into fans).
+fn subd_mesh(r: &Record) -> (Vec<P>, Vec<[i64; 4]>) {
+    let mut c = Cursor { pairs: r.pairs, i: 0 };
+    let n = c.seek(92).map_or(0, |n| (n.max(0.0) as usize).min(r.pairs.len()));
+    let verts: Vec<P> = (0..n)
+        .map(|_| {
+            let p = c.xy(10, 20);
+            c.take(30);
+            p
+        })
+        .collect();
+    let size = c.seek(93).map_or(0, |n| (n.max(0.0) as usize).min(r.pairs.len()));
+    let list: Vec<i64> = (0..size).map(|_| c.f(90) as i64).collect();
+    let mut faces = Vec::new();
+    let mut rest = &list[..];
+    while let [count, tail @ ..] = rest {
+        let count = (*count).max(0) as usize;
+        let face: Vec<i64> = tail.iter().take(count).map(|i| i + 1).collect();
+        for k in 1..face.len().saturating_sub(1) {
+            // Fan triangles; their inner edges are hidden (negative start index).
+            let (a, b, c) = (face[0], face[k], face[k + 1]);
+            let first = if k == 1 { a } else { -a };
+            let last = if k + 2 == face.len() { c } else { -c };
+            faces.push([first, b, last, 0]);
+        }
+        rest = tail.get(count..).unwrap_or(&[]);
+    }
+    (verts, faces)
+}
+
+/// An MLINE's element lines: each vertex (11) moved along its miter (13) by the element's first parameter (41).
+fn mline(r: &Record) -> Vec<Vec<P>> {
+    let mut c = Cursor { pairs: r.pairs, i: 0 };
+    let (count, elements) = (r.i(72, 0).max(0) as usize, r.i(73, 0).clamp(0, 64) as usize);
+    let mut lines = vec![Vec::new(); elements];
+    for _ in 0..count.min(r.pairs.len()) {
+        let Some(x) = c.seek(11) else { break };
+        let at = [x, c.f(21)];
+        c.take(31);
+        c.xy(12, 22);
+        c.take(32);
+        let miter = c.xy(13, 23);
+        c.take(33);
+        for line in &mut lines {
+            let params: Vec<f64> = (0..c.n(74)).map(|_| c.f(41)).collect();
+            for _ in 0..c.n(75) {
+                c.take(42);
+            }
+            let t = params.first().copied().unwrap_or(0.0);
+            line.push([at[0] + miter[0] * t, at[1] + miter[1] * t]);
+        }
+    }
+    // Flag 2: closed.
+    if r.i(71, 0) & 2 != 0 {
+        lines.iter_mut().for_each(|l| l.extend(l.first().copied()));
+    }
+    lines
 }
 
 /// A HATCH's boundary rings and pattern lines (None for a solid fill).
@@ -1760,9 +2088,46 @@ mod tests {
     }
 
     #[test]
+    fn solid_is_filled_in_zig_zag_order() {
+        let d = decode(&entities(&[(0, "SOLID"), (10, "0"), (20, "0"), (11, "4"), (21, "0"), (12, "0"), (22, "4"), (13, "4"), (23, "4")])).unwrap();
+        assert!(d.paths.is_empty());
+        assert_eq!(d.fills[0].rings[0], vec![[0.0, 4.0], [4.0, 4.0], [4.0, 0.0], [0.0, 0.0]]);
+    }
+
+    #[test]
+    fn polyface_edges_are_shared_and_hidden() {
+        let verts = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        // Two triangles sharing the diagonal 1–3 (drawn once); the second hides its edge 3–4.
+        let edges = polyface_edges(&verts, &[[1, 2, 3, 0], [-3, 4, 1, 0]]);
+        assert_eq!(edges, vec![vec![verts[0], verts[1]], vec![verts[1], verts[2]], vec![verts[2], verts[0]], vec![verts[3], verts[0]]]);
+        let grid = mesh_grid(&verts, 2, 2, false, true);
+        assert_eq!(grid.len(), 4);
+        assert_eq!(grid[0].len(), 3, "closed in N repeats the first vertex");
+    }
+
+    #[test]
+    fn wipeout_rectangle_from_clip_corners() {
+        let ring = wipeout_ring([10.0, 20.0], [5.0, 0.0], [0.0, 2.0], [1.0, 1.0], &[[-0.5, -0.5], [0.5, 0.5]]);
+        let mut ring = ring.clone();
+        ring.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(ring, vec![[10.0, 20.0], [10.0, 22.0], [15.0, 20.0], [15.0, 22.0]]);
+    }
+
+    #[test]
+    fn dimension_without_block_is_drawn_from_its_points() {
+        let d = decode(&entities(&[
+            (0, "DIMENSION"), (2, "*D9"), (10, "0"), (20, "5"), (11, "5"), (21, "5"), (70, "0"), (1, "<> mm"),
+            (13, "0"), (23, "0"), (14, "10"), (24, "0"), (50, "0"),
+        ]))
+        .unwrap();
+        assert_eq!(d.texts[0].text, "10.0000 mm");
+        assert_eq!(d.fills.len(), 2, "two arrowheads");
+    }
+
+    #[test]
     fn lists_entities_not_drawn() {
-        let d = decode(&entities(&[(0, "WIPEOUT"), (0, "WIPEOUT"), (0, "IMAGE"), (0, "POINT"), (10, "0"), (20, "0")])).unwrap();
-        assert_eq!(d.info.last().unwrap().1, "IMAGE × 1, WIPEOUT × 2");
+        let d = decode(&entities(&[(0, "OLE2FRAME"), (0, "OLE2FRAME"), (0, "IMAGE"), (0, "POINT"), (10, "0"), (20, "0")])).unwrap();
+        assert_eq!(d.info.last().unwrap().1, "IMAGE × 1, OLE2FRAME × 2");
     }
 
     /// A HATCH of the square (0,0)–(4,4) with the hole (1,1)–(3,3): a polyline path, an edge path, then `tail`.

@@ -4,11 +4,12 @@
 use std::f64::consts::TAU;
 use std::io::Cursor;
 
-use acadrust::entities::{AttributeEntity, Body, BoundaryEdge, BoundaryPath, EntityCommon, LeaderPathType, Region, Solid3D};
+use acadrust::entities::{AttributeEntity, Body, BoundaryEdge, BoundaryPath, Dimension, EntityCommon, LeaderPathType, Region, Solid3D};
 use acadrust::tables::{LineType, LineTypeComplexContent};
 use acadrust::types::{Color, Handle, Vector2, Vector3};
 use acadrust::{CadDocument, DwgReader, EntityType};
 
+use crate::dxf::dim::{self, Dim, DimStyle, DimText};
 use crate::dxf::{self, parse, Affine, Ctx, HatchLine, Layer, LeaderLine, LeaderRoot, LeaderText, LinetypeElement, LinetypeShape, MultiLeader, Parent, Pen, World, P};
 
 pub fn decode(data: &[u8]) -> Result<dxf::Drawing, String> {
@@ -31,7 +32,24 @@ pub fn decode(data: &[u8]) -> Result<dxf::Drawing, String> {
     let mut info = vec![("DWG version".to_string(), dxf::version(Some(code)))];
     info.extend(dxf::summary(units, &layers, doc.block_records.names(), doc.model_space_entities().count()));
 
-    let mut b = Builder { doc: &doc, world: World::new(layers) };
+    let h = &doc.header;
+    let dim_style = DimStyle {
+        arrow: h.dim_arrow_size,
+        text: h.dim_text_height,
+        ext_offset: h.dim_ext_line_offset,
+        ext_beyond: h.dim_ext_line_extension,
+        gap: h.dim_line_gap,
+        above: h.dim_text_above != 0,
+        horizontal: h.dim_text_inside_horizontal,
+        lfac: h.dim_linear_scale,
+        dec: h.dim_decimal_places.into(),
+        adec: h.dim_angular_decimal_places.into(),
+        zin: h.dim_zero_suppression.into(),
+        sep: h.dim_decimal_separator,
+        post: h.dim_post.clone(),
+        scale: h.dim_scale,
+    };
+    let mut b = Builder { doc: &doc, world: World::new(layers), dim_style };
     for lt in doc.line_types.iter() {
         if let Some(elements) = linetype_elements(&doc, lt) {
             b.world.add_linetype(&lt.name, elements.iter().map(|e| e.scaled(doc.header.linetype_scale)).collect());
@@ -120,16 +138,66 @@ fn widths(own: [f64; 2], default: [f64; 2]) -> [f64; 2] {
     if own == [0.0; 2] { default } else { own }
 }
 
-/// Draws a TEXT-like attribute (on an INSERT, or standalone).
+/// Draws a TEXT-like attribute (on an INSERT, or standalone), or attribute definition with `value`.
+macro_rules! attribute {
+    ($w:expr, $a:expr, $value:expr, $m:expr, $pen:expr) => {{
+        let a = $a;
+        let (h, v) = (a.horizontal_alignment as i64, a.vertical_alignment as i64);
+        let (pos, rotation, align) = dxf::text_anchor(h, v, xy(a.insertion_point), xy(a.alignment_point), a.rotation);
+        let m = $m.then(&Affine::extrusion(a.normal.z)).then(&dxf::text_mirror(a.text_generation_flags.into(), pos, rotation));
+        $w.push_text(pos, rotation, a.height, a.width_factor, align, parse::text_rich($value), &m, $pen);
+    }};
+}
+
 fn attribute(w: &mut World, a: &AttributeEntity, m: &Affine, pen: Pen) {
-    let (h, v) = (a.horizontal_alignment as i64, a.vertical_alignment as i64);
-    let (pos, rotation, align) = dxf::text_anchor(h, v, xy(a.insertion_point), xy(a.alignment_point), a.rotation);
-    w.push_text(pos, rotation, a.height, a.width_factor, align, parse::text_codes(&a.value), &m.then(&Affine::extrusion(a.normal.z)), pen);
+    attribute!(w, a, &a.value, m, pen)
+}
+
+/// A dimension style's variables.
+fn dim_style(s: &acadrust::tables::DimStyle) -> DimStyle {
+    DimStyle {
+        arrow: s.dimasz,
+        text: s.dimtxt,
+        ext_offset: s.dimexo,
+        ext_beyond: s.dimexe,
+        gap: s.dimgap,
+        above: s.dimtad != 0,
+        horizontal: s.dimtih,
+        lfac: s.dimlfac,
+        dec: s.dimdec.into(),
+        adec: s.dimadec.into(),
+        zin: s.dimzin.into(),
+        sep: char::from_u32(s.dimdsep as u32).filter(|&c| c > ' ').unwrap_or('.'),
+        post: s.dimpost.clone(),
+        scale: s.dimscale,
+    }
+}
+
+/// A dimension's geometry and text.
+fn dimension(d: &Dimension) -> (Dim, DimText<'_>) {
+    let geometry = match d {
+        Dimension::Linear(d) => Dim::Linear { ext1: xy(d.first_point), ext2: xy(d.second_point), line: xy(d.definition_point), angle: Some(d.rotation) },
+        Dimension::Aligned(d) => Dim::Linear { ext1: xy(d.first_point), ext2: xy(d.second_point), line: xy(d.definition_point), angle: None },
+        Dimension::Radius(d) => Dim::Radius { centre: xy(d.angle_vertex), on_curve: xy(d.definition_point) },
+        Dimension::Diameter(d) => Dim::Diameter { a: xy(d.angle_vertex), b: xy(d.definition_point) },
+        Dimension::Angular2Ln(d) => Dim::Angular2 { l1: [xy(d.first_point), xy(d.second_point)], l2: [xy(d.angle_vertex), xy(d.definition_point)], arc: xy(d.dimension_arc) },
+        Dimension::Angular3Pt(d) => Dim::Angular3 { vertex: xy(d.angle_vertex), a: xy(d.first_point), b: xy(d.second_point), arc: xy(d.definition_point) },
+        Dimension::Ordinate(d) => Dim::Ordinate { origin: xy(d.definition_point), feature: xy(d.feature_location), leader: xy(d.leader_endpoint), x: d.is_ordinate_type_x },
+        Dimension::Arc(d) => Dim::ArcLength { centre: xy(d.center_point), a: xy(d.first_extension_point), b: xy(d.second_extension_point), arc: xy(d.definition_point) },
+        Dimension::LargeRadial(d) => Dim::Jogged { centre: xy(d.definition_point), chord: xy(d.chord_point), jog: xy(d.jog_point), shown_centre: xy(d.override_center) },
+    };
+    let b = d.base();
+    // A text point at the origin is a writer's default, not a position.
+    let at = Some(xy(b.text_middle_point)).filter(|&p| p != [0.0; 2]);
+    let user = b.user_text.as_deref().unwrap_or(&b.text);
+    (geometry, DimText { user, at, rotation: Some(b.text_rotation).filter(|&a| a != 0.0) })
 }
 
 struct Builder<'a> {
     doc: &'a CadDocument,
     world: World<'a>,
+    /// For dimensions whose style is not listed.
+    dim_style: DimStyle,
 }
 
 impl<'a> Builder<'a> {
@@ -156,15 +224,67 @@ impl<'a> Builder<'a> {
                 let verts: Vec<_> = verts.map(|v| (xy(v.location), v.bulge, widths([v.start_width, v.end_width], [p.start_width, p.end_width]))).collect();
                 w.polyline(&verts, p.flags.is_closed(), &ocs(p.normal), pen);
             }
+            EntityType::PolyfaceMesh(p) => {
+                let verts: Vec<P> = p.vertices.iter().map(|v| xy(v.location)).collect();
+                let faces: Vec<[i64; 4]> = p.faces.iter().map(|f| [f.index1, f.index2, f.index3, f.index4].map(i64::from)).collect();
+                dxf::polyface_edges(&verts, &faces).into_iter().for_each(|edge| w.path(edge, &m, pen));
+            }
+            EntityType::PolygonMesh(p) => {
+                let verts: Vec<P> = p.vertices.iter().map(|v| xy(v.location)).collect();
+                let (rows, cols) = (p.m_vertex_count.max(0) as usize, p.n_vertex_count.max(0) as usize);
+                let closed = (p.flags.bits() & 1 != 0, p.flags.bits() & 32 != 0);
+                dxf::mesh_grid(&verts, rows, cols, closed.0, closed.1).into_iter().for_each(|line| w.path(line, &m, pen));
+            }
+            EntityType::Mesh(mesh) => {
+                for face in &mesh.faces {
+                    let mut ring: Vec<P> = face.vertices.iter().filter_map(|&i| mesh.vertices.get(i)).map(|&v| xy(v)).collect();
+                    ring.extend(ring.first().copied());
+                    w.path(ring, &m, pen);
+                }
+            }
+            EntityType::Helix(h) => {
+                let s = &h.spline;
+                let ctrl: Vec<_> = s.control_points.iter().copied().map(xy).collect();
+                let fit: Vec<_> = s.fit_points.iter().copied().map(xy).collect();
+                w.path(dxf::spline_points(s.degree.max(1) as usize, &ctrl, &s.knots, &s.weights, &fit), &m, pen);
+            }
+            EntityType::MLine(ml) => {
+                // Each element runs through the vertices, moved along their miters by its first parameter.
+                let elements = ml.vertices.iter().map(|v| v.segments.len()).max().unwrap_or(0);
+                for e in 0..elements {
+                    let mut line: Vec<P> = ml.vertices.iter().map(|v| {
+                        let t = v.segments.get(e).and_then(|s| s.parameters.first()).copied().unwrap_or(0.0);
+                        xy(v.position + v.miter * t)
+                    }).collect();
+                    if ml.is_closed() {
+                        line.extend(line.first().copied());
+                    }
+                    w.path(line, &m, pen);
+                }
+            }
+            EntityType::Wipeout(wo) => {
+                let clip: Vec<P> = wo.clip_boundary_vertices.iter().map(|&v| v2(v)).collect();
+                w.wipeout(dxf::wipeout_ring(xy(wo.insertion_point), xy(wo.u_vector), xy(wo.v_vector), v2(wo.size), &clip), &m, pen.layer);
+            }
+            EntityType::Tolerance(t) => {
+                let style = self.doc.dim_styles.get(&t.dimension_style_name).map_or_else(|| self.dim_style.clone(), dim_style).scaled();
+                let dir = if t.direction.x == 0.0 && t.direction.y == 0.0 { [1.0, 0.0] } else { xy(t.direction) };
+                dim::tolerance(w, xy(t.insertion_point), dir, &t.text, &style, &m, pen);
+            }
+            // A table's graphics are an anonymous block (named, or found by its record's handle),
+            // placed like an INSERT along the table's direction.
+            EntityType::Table(t) => {
+                let name = Some(t.block_name.as_str()).filter(|n| !n.is_empty()).or_else(|| self.block_name(&hex(t.block_record_handle)?));
+                let Some(name) = name else { return };
+                let dir = t.horizontal_direction;
+                let at = m.then(&Affine::translate(xy(t.insertion_point))).then(&Affine::rotate(dir.y.atan2(dir.x)));
+                self.expand(name, at, parent, ctx);
+            }
             EntityType::Polyline3D(p) => {
                 let verts: Vec<_> = p.vertices.iter().filter(|v| v.flags & 16 == 0).map(|v| (xy(v.position), 0.0, [0.0; 2])).collect();
                 w.polyline(&verts, p.flags.closed, &m, pen);
             }
-            // SOLID and TRACE list their corners in zig-zag order.
-            EntityType::Solid(s) => {
-                let pts = [s.first_corner, s.second_corner, s.fourth_corner, s.third_corner, s.first_corner];
-                w.path(pts.map(xy).to_vec(), &ocs(s.normal), pen);
-            }
+            EntityType::Solid(s) => w.solid([s.first_corner, s.second_corner, s.third_corner, s.fourth_corner].map(xy), &ocs(s.normal), pen),
             EntityType::Face3D(f) => {
                 let pts = [f.first_corner, f.second_corner, f.third_corner, f.fourth_corner, f.first_corner];
                 w.path(pts.map(xy).to_vec(), &m, pen);
@@ -183,12 +303,25 @@ impl<'a> Builder<'a> {
                 let second = t.alignment_point.unwrap_or(t.insertion_point);
                 let (h, v) = (t.horizontal_alignment as i64, t.vertical_alignment as i64);
                 let (pos, rotation, align) = dxf::text_anchor(h, v, xy(t.insertion_point), xy(second), t.rotation);
-                w.push_text(pos, rotation, t.height, t.width_factor, align, parse::text_codes(&t.value), &ocs(t.normal), pen);
+                let m = ocs(t.normal).then(&dxf::text_mirror(t.generation_flags.into(), pos, rotation));
+                w.push_text(pos, rotation, t.height, t.width_factor, align, parse::text_rich(&t.value), &m, pen);
             }
             EntityType::AttributeEntity(a) => attribute(w, a, &m, pen),
+            // An attribute definition shows its tag outside blocks; inside one only a constant one shows, its value.
+            EntityType::AttributeDefinition(a) if !a.flags.invisible => match (ctx.depth, a.flags.constant) {
+                (0, _) => attribute!(w, a, &a.tag, m, pen),
+                (_, true) => attribute!(w, a, &a.default_value, m, pen),
+                _ => {}
+            },
             EntityType::MText(t) => {
                 let align = dxf::mtext_align(t.attachment_point as i64);
-                w.mtext(xy(t.insertion_point), t.rotation, t.height, t.rectangle_width, align, parse::mtext_plain(&t.value), &m, pen);
+                let start = w.text_count();
+                w.mtext(xy(t.insertion_point), t.rotation, t.height, t.rectangle_width, align, parse::mtext_rich(&t.value, t.height), &m, pen);
+                // Background mask: flag 1 in its own colour, 2 in the paper's.
+                if t.background_fill_flags & 3 != 0 {
+                    let color = if t.background_fill_flags & 2 != 0 { dxf::BACKGROUND } else { recolor(&t.background_color, pen).color };
+                    w.mask_texts(start, color, (t.background_scale - 1.0) * t.height, &m);
+                }
             }
             EntityType::Insert(i) => {
                 let base = self.doc.block_records.get(&i.block_name).map_or([0.0; 2], |b| xy(b.base_point));
@@ -217,14 +350,12 @@ impl<'a> Builder<'a> {
             EntityType::Hatch(h) => {
                 let rings = h.paths.iter().map(boundary).collect();
                 let lines: Vec<_> = h.pattern.lines.iter().map(|l| HatchLine { angle: l.angle, base: v2(l.base_point), offset: v2(l.offset), dashes: l.dash_lengths.clone() }).collect();
-                // A gradient is filled with its first colour.
-                let gradient = h.gradient_color.colors.first().filter(|_| h.gradient_color.enabled).map(|c| color(&c.color));
-                let pen = match gradient {
-                    Some((index, rgb)) => Pen { color: rgb.unwrap_or_else(|| dxf::aci(index)), ..pen },
-                    None => pen,
-                };
-                let solid = h.is_solid || gradient.is_some();
-                w.hatch(rings, (!solid).then_some(&lines[..]), &ocs(h.normal), pen);
+                let g = &h.gradient_color;
+                let colors: Vec<u32> = g.colors.iter().map(|c| recolor(&c.color, pen).color).collect();
+                match dxf::gradient_colors(&colors, g.is_single_color, g.color_tint).filter(|_| g.enabled) {
+                    Some((c1, c2)) => w.gradient(rings, &g.name, g.angle, c1, c2, &ocs(h.normal), pen),
+                    None => w.hatch(rings, (!h.is_solid).then_some(&lines[..]), &ocs(h.normal), pen),
+                }
             }
             EntityType::MultiLeader(ml) => {
                 let c = &ml.context;
@@ -246,9 +377,17 @@ impl<'a> Builder<'a> {
                 let leader = MultiLeader { roots: roots.collect(), dogleg: ml.enable_dogleg, arrow_size: c.arrowhead_size, arrow: hex(ml.arrowhead_handle), text, block };
                 self.multileader(&leader, m, parent, recolor(&ml.line_color, pen), recolor(&c.text_color, pen), ctx);
             }
-            // A dimension's lines, arrows and text are in an anonymous block, already in world coordinates.
-            EntityType::Dimension(d) => self.expand(&d.base().block_name, m, parent, ctx),
-            // Attribute definitions show as attributes on the INSERT instead.
+            // A dimension's lines, arrows and text are in an anonymous block, already in world
+            // coordinates. Without one it is drawn from its definition points.
+            EntityType::Dimension(d) => {
+                let name = &d.base().block_name;
+                if self.doc.entities_in_block(name).next().is_some() {
+                    return self.expand(name, m, parent, ctx);
+                }
+                let style = self.doc.dim_styles.get(&d.base().style_name).map_or_else(|| self.dim_style.clone(), dim_style).scaled();
+                let (geometry, text) = dimension(d);
+                dim::draw(&mut self.world, &geometry, &text, &style, &m, pen);
+            }
             EntityType::AttributeDefinition(_) => {}
             other => w.skip(other.as_entity().entity_type()),
         }

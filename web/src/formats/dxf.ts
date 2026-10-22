@@ -44,6 +44,52 @@ interface Text {
   lines: string[];
   color: number;
   layer: number;
+  /** Background mask colour and its margin in drawing units, if any; and the width it spans (0: the text's own). */
+  mask?: { color: number; margin: number; width: number };
+  /** Lines of styled runs, for MTEXT with inline formatting; `lines` then holds their plain text. */
+  rich?: RichLine[];
+}
+
+/** Rich-text markup from the WASM side (see `parse::mtext_rich`). */
+const STYLE = '\uE000';
+const STYLE_END = '\uE001';
+const STACK = '\uE002';
+const STACK_OVER = '\uE003';
+const STACK_KIND = '\uE004';
+const STACK_END = '\uE005';
+/** Stacked text size, in the run's heights. */
+const STACK_SIZE = 0.7;
+
+interface RunStyle {
+  /** Height and width factors, tracking factor, oblique angle in degrees. */
+  height: number;
+  width: number;
+  tracking: number;
+  oblique: number;
+  /** 0xRRGGBB, or -1 for the text's colour. */
+  color: number;
+  /** Font code as in `textFonts()`; 0 keeps the text's own. */
+  font: number;
+  /** 1 underline, 2 overline, 4 strike-through. */
+  lines: number;
+}
+
+const PLAIN: RunStyle = { height: 1, width: 1, tracking: 1, oblique: 0, color: -1, font: 0, lines: 0 };
+
+/** Text in one style, or a stacked fraction if `bottom` is set; `width` is in cap heights of the text. */
+interface Run {
+  text: string;
+  bottom?: string;
+  kind?: string;
+  style: RunStyle;
+  width: number;
+}
+
+/** A line of runs; `width` and `height` (its tallest run) in cap heights of the text. */
+interface RichLine {
+  runs: Run[];
+  width: number;
+  height: number;
 }
 
 interface Stroke {
@@ -63,6 +109,17 @@ interface Fill {
   color: number;
   layer: number;
   rule: CanvasFillRule;
+  /** Drawn over the lines (a wipeout) instead of under them. */
+  mask: boolean;
+  gradient?: Gradient;
+}
+
+/** Linear from `a` to `b`, or radial about `a` out to `b`; stops are offset and colour. */
+interface Gradient {
+  radial: boolean;
+  a: [number, number];
+  b: [number, number];
+  stops: [number, number][];
 }
 
 /** A raster image in the drawing; `x`, `y` is its top-left corner and `px` the size of a pixel, in drawing units. */
@@ -151,9 +208,20 @@ function fills(doc: DxfDoc): Fill[] {
   const colors = doc.fillColors();
   const layers = doc.fillLayers();
   const evenOdd = doc.fillEvenOdd();
+  const masks = doc.fillMasks();
+  const gradients = doc.fillGradients();
+  const stops = doc.fillGradientStops();
+  let stop = 0;
   let ring = 0;
   let k = 0;
   return Array.from(doc.fillRingCounts(), (count, i) => {
+    const [kind, ax, ay, bx, by, n] = gradients.subarray(6 * i, 6 * i + 6);
+    let gradient: Gradient | undefined;
+    if (kind > 0) {
+      const list: [number, number][] = [];
+      for (const end = stop + n; stop < end; stop++) list.push([stops[2 * stop], stops[2 * stop + 1]]);
+      gradient = { radial: kind === 2, a: [ax, ay], b: [bx, by], stops: list };
+    }
     const path = new Path2D();
     for (const end = ring + count; ring < end; ring++) {
       const n = lengths[ring];
@@ -162,8 +230,18 @@ function fills(doc: DxfDoc): Fill[] {
       path.closePath();
       k += 2 * n;
     }
-    return { path, color: colors[i], layer: layers[i], rule: evenOdd[i] ? 'evenodd' : 'nonzero' };
+    return { path, color: colors[i], layer: layers[i], rule: evenOdd[i] ? 'evenodd' : 'nonzero', mask: masks[i] === 1, gradient };
   });
+}
+
+/** Fill style of `fill`: its colour, or its gradient in drawing coordinates. */
+function fillStyle(ctx: CanvasRenderingContext2D, fill: Fill, invert: boolean): string | CanvasGradient {
+  const g = fill.gradient;
+  if (!g) return css(fill.color, invert);
+  const [[ax, ay], [bx, by]] = [g.a, g.b];
+  const gradient = g.radial ? ctx.createRadialGradient(ax, ay, 0, ax, ay, Math.hypot(bx - ax, by - ay)) : ctx.createLinearGradient(ax, ay, bx, by);
+  for (const [offset, color] of g.stops) gradient.addColorStop(Math.min(1, Math.max(0, offset)), css(color, invert));
+  return gradient;
 }
 
 /** Takes the raster images out of `doc`; they must be freed. */
@@ -209,6 +287,7 @@ function texts(doc: DxfDoc): Text[] {
   const fits = doc.textFits();
   const wraps = doc.textWraps();
   const fonts = doc.textFonts();
+  const masks = doc.textMasks();
   const measure = document.createElement('canvas').getContext('2d')!;
   return doc.textStrings().map((string, i) => {
     const style = (fonts[i] & 4 ? 'italic ' : '') + (fonts[i] & 8 ? 'bold ' : '');
@@ -217,10 +296,14 @@ function texts(doc: DxfDoc): Text[] {
     // Measured at a height of 100, a string's drawn width is its measured width per 100 × |x|.
     measure.font = `${style}${100 * EM_PER_CAP}px ${family}`;
     const width = (s: string) => (measure.measureText(s).width / 100) * Math.hypot(ax, ay);
-    const lines = string.split('\n').flatMap((l) => (wraps[i] > 0 ? wrap(l, wraps[i], width) : [l]));
+    const cap = Math.hypot(ux, uy);
+    // Rich text is laid out in cap heights; a cap height is |x| drawing units along the baseline.
+    const rich = /[\uE000\uE002]/.test(string) ? layoutRich(parseRich(string), wraps[i] / Math.hypot(ax, ay), style, family, measure) : undefined;
+    const lines = rich
+      ? rich.map((l) => l.runs.map((r) => (r.bottom === undefined ? r.text : `${r.text}/${r.bottom}`)).join(''))
+      : string.split('\n').flatMap((l) => (wraps[i] > 0 ? wrap(l, wraps[i], width) : [l]));
     const longest = Math.max(...lines.map((l) => l.length));
     // Text with a fit width shrinks to it.
-    const cap = Math.hypot(ux, uy);
     let height = cap;
     if (fits[i] > 0) height *= Math.min(1, fits[i] / Math.max(...lines.map(width)));
     return {
@@ -238,7 +321,181 @@ function texts(doc: DxfDoc): Text[] {
       lines,
       color: colors[i],
       layer: layers[i],
+      mask: masks[2 * i] >= 0 ? { color: masks[2 * i], margin: masks[2 * i + 1], width: wraps[i] } : undefined,
+      rich,
     };
+  });
+}
+
+/**
+ * Fills the mask behind text `t`, drawn with the canvas set up as in `draw()` (glyph space in device
+ * pixels, font set): the lines' box, or the wrap width if it has one, plus the margin.
+ */
+function drawMask(ctx: CanvasRenderingContext2D, t: Text, px: number, scale: number, invert: boolean): void {
+  const mask = t.mask!;
+  // Glyph-space pixels per drawing unit along the baseline, which the width factor stretches.
+  const along = scale / Math.hypot(t.matrix[0], t.matrix[1]);
+  let [left, top, width, height] = t.rich ? richBox(t, px) : [0, 0, Math.max(...t.lines.map((l) => ctx.measureText(l).width)), 0];
+  if (!t.rich) {
+    const pitch = px * LINE_SPACING;
+    const first = -t.shift * pitch;
+    const last = first + (t.lines.length - 1) * pitch;
+    const [a, b] = t.baseline === 'top' ? [first, last + px] : t.baseline === 'middle' ? [first - px / 2, last + px / 2] : [first - px, last];
+    [top, height] = [a, b - a];
+  }
+  // AutoCAD's mask spans the defined width, or the text where that is wider.
+  if (mask.width > 0) width = Math.max(width, mask.width * along);
+  left = t.align === 'left' ? 0 : t.align === 'center' ? -width / 2 : -width;
+  const bottom = top + height;
+  const [mx, my] = [mask.margin * along, mask.margin * scale];
+  ctx.fillStyle = css(mask.color, invert);
+  ctx.fillRect(left - mx, top - my, width + 2 * mx, bottom - top + 2 * my);
+}
+
+/** Lines of runs (widths unset) from rich-text markup. */
+function parseRich(s: string): Run[][] {
+  const lines: Run[][] = [[]];
+  let style = PLAIN;
+  let i = 0;
+  const upTo = (mark: string) => {
+    const end = s.indexOf(mark, i);
+    const part = s.slice(i, end < 0 ? s.length : end);
+    i = end < 0 ? s.length : end + 1;
+    return part;
+  };
+  while (i < s.length) {
+    const c = s[i++];
+    const line = lines[lines.length - 1];
+    if (c === STYLE) {
+      const [height, width, tracking, oblique, color, font, rules] = upTo(STYLE_END).split(';');
+      style = { height: +height, width: +width, tracking: +tracking, oblique: +oblique, color: color === '-' ? -1 : parseInt(color, 16), font: +font, lines: +rules };
+    } else if (c === STACK) {
+      const text = upTo(STACK_OVER);
+      const bottom = upTo(STACK_KIND);
+      line.push({ text, bottom, kind: upTo(STACK_END), style, width: 0 });
+    } else if (c === '\n') {
+      lines.push([]);
+    } else {
+      const last = line[line.length - 1];
+      if (last && last.bottom === undefined && last.style === style) last.text += c;
+      else line.push({ text: c, style, width: 0 });
+    }
+  }
+  return lines;
+}
+
+/** CSS font style prefix and family of `run`, over the text's own. */
+function runFont(run: Run, style: string, family: string): [string, string] {
+  if (!run.style.font) return [style, family];
+  const f = run.style.font;
+  return [(f & 4 ? 'italic ' : '') + (f & 8 ? 'bold ' : ''), FAMILY[f & 3] ?? FAMILY[0]];
+}
+
+/**
+ * Measures the runs of `lines` (in cap heights) and word-wraps them at `max` cap heights (0 for no wrapping).
+ * `measure` is a scratch context.
+ */
+function layoutRich(lines: Run[][], max: number, style: string, family: string, measure: CanvasRenderingContext2D): RichLine[] {
+  const widthOf = (run: Run, text: string, size: number) => {
+    const [s, f] = runFont(run, style, family);
+    measure.font = `${s}${100 * EM_PER_CAP * size}px ${f}`;
+    return (measure.measureText(text).width / 100) * run.style.width * run.style.tracking;
+  };
+  const measured = (run: Run): Run => {
+    const h = run.style.height;
+    if (run.bottom === undefined) return { ...run, width: widthOf(run, run.text, h) };
+    const small = h * STACK_SIZE;
+    const width = run.kind === '#' ? widthOf(run, `${run.text}/${run.bottom}`, small) : Math.max(widthOf(run, run.text, small), widthOf(run, run.bottom, small));
+    return { ...run, width };
+  };
+  const out: RichLine[] = [];
+  const finish = (runs: Run[]) => out.push({ runs, width: runs.reduce((a, r) => a + r.width, 0), height: Math.max(1e-9, ...runs.map((r) => r.style.height)) });
+  for (const line of lines) {
+    // Words keep their trailing space, so a wrapped line can be split between any two.
+    const pieces = line.flatMap((run) => (run.bottom === undefined && max > 0 ? run.text.split(/(?<= )/).map((text) => ({ ...run, text })) : [run])).map(measured);
+    let current: Run[] = [];
+    let width = 0;
+    for (const piece of pieces) {
+      if (max > 0 && current.length && width + piece.width > max) {
+        finish(current);
+        [current, width] = [[], 0];
+      }
+      current.push(piece);
+      width += piece.width;
+    }
+    finish(current);
+  }
+  if (!out.length) finish([]);
+  return out;
+}
+
+/** Baselines of rich lines below the top of the block, in cap heights, and the block's height. */
+function richBaselines(lines: RichLine[]): [number[], number] {
+  let y = 0;
+  const baselines = lines.map((l, i) => (y += i === 0 ? l.height : l.height * LINE_SPACING));
+  return [baselines, y];
+}
+
+/** Top-left corner and size of a rich text's block in glyph space (device pixels), for cap height `px`. */
+function richBox(t: Text, px: number): [number, number, number, number] {
+  const lines = t.rich!;
+  const [, height] = richBaselines(lines);
+  const width = Math.max(...lines.map((l) => l.width)) * px;
+  const left = t.align === 'left' ? 0 : t.align === 'center' ? -width / 2 : -width;
+  const top = t.baseline === 'top' ? 0 : t.baseline === 'middle' ? (-height * px) / 2 : -height * px;
+  return [left, top, width, height * px];
+}
+
+/** Draws a rich text's runs with the canvas set up as in `draw()`: glyph space in device pixels, cap height `px`. */
+function drawRich(ctx: CanvasRenderingContext2D, t: Text, px: number, invert: boolean): void {
+  const [left, top, width] = richBox(t, px);
+  const [baselines] = richBaselines(t.rich!);
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+  t.rich!.forEach((line, i) => {
+    let x = left + (width - line.width * px) * (t.align === 'left' ? 0 : t.align === 'center' ? 0.5 : 1);
+    const y = top + baselines[i] * px;
+    for (const run of line.runs) {
+      const { height, width: stretch, tracking, oblique, color, lines } = run.style;
+      const h = px * height;
+      const [style, family] = runFont(run, t.style, t.family);
+      const font = (size: number) => (ctx.font = `${style}${size * EM_PER_CAP}px ${family}`);
+      ctx.fillStyle = css(color < 0 ? t.color : color, invert);
+      ctx.save();
+      // Width factor along the baseline; oblique leans glyphs to the right as they rise (glyph y is down).
+      ctx.transform(stretch, 0, -Math.tan((oblique * Math.PI) / 180), 1, x, y);
+      const w = (run.width * px) / stretch;
+      if (run.bottom !== undefined) {
+        font(h * STACK_SIZE);
+        if (run.kind === '#') {
+          ctx.fillText(`${run.text}/${run.bottom}`, 0, -h * 0.25);
+        } else {
+          const centre = (s: string) => (run.kind === '^' ? 0 : (w - ctx.measureText(s).width) / 2);
+          ctx.fillText(run.text, centre(run.text), -h * 0.55);
+          ctx.fillText(run.bottom, centre(run.bottom), h * 0.35);
+          if (run.kind === '/') ctx.fillRect(0, -h * 0.45, w, Math.max(1, h * 0.06));
+        }
+      } else {
+        font(h);
+        if (tracking === 1) {
+          ctx.fillText(run.text, 0, 0);
+        } else {
+          // Tracking spreads the characters; their advances are scaled to the measured width.
+          const natural = ctx.measureText(run.text).width;
+          let cx = 0;
+          for (const ch of run.text) {
+            ctx.fillText(ch, cx, 0);
+            cx += ctx.measureText(ch).width + (natural * (tracking - 1)) / Math.max(1, [...run.text].length);
+          }
+        }
+      }
+      const rule = (at: number) => ctx.fillRect(0, at, w, Math.max(1, h * 0.06));
+      if (lines & 1) rule(h * 0.2);
+      if (lines & 2) rule(-h * 1.2);
+      if (lines & 4) rule(-h * 0.45);
+      ctx.restore();
+      x += run.width * px;
+    }
   });
 }
 
@@ -323,11 +580,14 @@ export function vectorDocument(doc: DxfDoc): VectorDocument {
 
         // Fills go under all lines, whatever their order in the file.
         ctx.setTransform(scale, 0, 0, scale, -x * scale, -y * scale);
-        for (const fill of areas) {
-          if (!layerList[fill.layer].visible) continue;
-          ctx.fillStyle = css(fill.color, invert);
-          ctx.fill(fill.path, fill.rule);
-        }
+        const paint = (masks: boolean) => {
+          for (const fill of areas) {
+            if (fill.mask !== masks || !layerList[fill.layer].visible) continue;
+            ctx.fillStyle = fillStyle(ctx, fill, invert);
+            ctx.fill(fill.path, fill.rule);
+          }
+        };
+        paint(false);
 
         // Lines are at least one device pixel wide at any zoom; hairlines exactly that.
         ctx.lineCap = 'round';
@@ -342,6 +602,8 @@ export function vectorDocument(doc: DxfDoc): VectorDocument {
           }
         }
         ctx.setLineDash([]);
+        // Wipeouts hide the lines under them.
+        paint(true);
 
         for (const t of labels) {
           const px = t.height * scale;
@@ -353,6 +615,11 @@ export function vectorDocument(doc: DxfDoc): VectorDocument {
           ctx.font = `${t.style}${px * EM_PER_CAP}px ${t.family}`;
           ctx.textAlign = t.align;
           ctx.textBaseline = t.baseline;
+          if (t.mask) drawMask(ctx, t, px, scale, invert);
+          if (t.rich) {
+            drawRich(ctx, t, px, invert);
+            continue;
+          }
           ctx.fillStyle = css(t.color, invert);
           t.lines.forEach((line, i) => ctx.fillText(line, 0, (i - t.shift) * px * LINE_SPACING));
         }

@@ -266,6 +266,26 @@ impl DxfDoc {
         self.drawing.fills.iter().map(|f| f.even_odd as u8).collect()
     }
 
+    /// 1 for fills drawn over the lines (wipeouts), 0 for the rest.
+    #[wasm_bindgen(js_name = fillMasks)]
+    pub fn fill_masks(&self) -> Vec<u8> {
+        self.drawing.fills.iter().map(|f| f.mask as u8).collect()
+    }
+
+    /// Six numbers per fill: gradient kind (0 none, 1 linear, 2 radial), points a and b (see
+    /// `dxf::Gradient`), and its number of stops in `fillGradientStops()`.
+    #[wasm_bindgen(js_name = fillGradients)]
+    pub fn fill_gradients(&self) -> Vec<f64> {
+        let geometry = |g: &dxf::Gradient| [if g.radial { 2.0 } else { 1.0 }, g.a[0], g.a[1], g.b[0], g.b[1], g.stops.len() as f64];
+        self.drawing.fills.iter().flat_map(|f| f.gradient.as_ref().map_or([0.0; 6], geometry)).collect()
+    }
+
+    /// Offset and colour of each gradient stop, fill after fill.
+    #[wasm_bindgen(js_name = fillGradientStops)]
+    pub fn fill_gradient_stops(&self) -> Vec<f64> {
+        self.drawing.fills.iter().filter_map(|f| f.gradient.as_ref()).flat_map(|g| g.stops.iter().flat_map(|&(t, c)| [t, c as f64])).collect()
+    }
+
     /// The page as top-left x, y, width and height, or empty if there is none.
     pub fn background(&self) -> Vec<f64> {
         self.drawing.background.iter().flat_map(|b| [b.pos[0], b.pos[1], b.size[0], b.size[1]]).collect()
@@ -327,6 +347,12 @@ impl DxfDoc {
     #[wasm_bindgen(js_name = textFonts)]
     pub fn text_fonts(&self) -> Vec<u8> {
         self.drawing.texts.iter().map(|t| t.font).collect()
+    }
+
+    /// Two numbers per text: background mask colour (-1 for none) and how far it reaches beyond the text, in drawing units.
+    #[wasm_bindgen(js_name = textMasks)]
+    pub fn text_masks(&self) -> Vec<f64> {
+        self.drawing.texts.iter().flat_map(|t| t.mask.map_or([-1.0, 0.0], |(c, margin)| [c as f64, margin])).collect()
     }
 
     #[wasm_bindgen(js_name = textColors)]
