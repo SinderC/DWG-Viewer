@@ -724,7 +724,7 @@ impl Decoder {
         let font = self.fonts.get((st.font - 1).max(0) as usize).map_or(FONT_SANS, |name| font_style(name));
         let pen = self.pen(self.st.text_color, 0.0);
         if !vertical {
-            return self.world.text_frame(pos, x, upv, (h, v), chars.into_iter().collect(), TextStyle { fit, font }, &m, pen);
+            return self.world.text_frame(pos, x, upv, (h, v), chars.into_iter().collect(), TextStyle { fit, font, ..TextStyle::default() }, &m, pen);
         }
         // Distance from the anchor up to the top of the column, which runs from the first
         // character's top to the last one's baseline.
@@ -736,7 +736,7 @@ impl Decoder {
         };
         for (i, c) in chars.into_iter().enumerate() {
             let at = top - i as f64 * pitch;
-            self.world.text_frame([pos[0] + up[0] * at, pos[1] + up[1] * at], x, upv, (h, 3), c.to_string(), TextStyle { fit: 0.0, font }, &m, pen);
+            self.world.text_frame([pos[0] + up[0] * at, pos[1] + up[1] * at], x, upv, (h, 3), c.to_string(), TextStyle { font, ..TextStyle::default() }, &m, pen);
         }
     }
 

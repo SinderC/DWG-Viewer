@@ -70,6 +70,8 @@ pub struct Text {
     pub layer: u32,
     /// Width the text is shrunk to fit if wider, in drawing units; 0 for none.
     pub fit: f64,
+    /// Width the text's lines are word-wrapped at, in drawing units; 0 for none.
+    pub wrap: f64,
     /// Font family and style: `FONT_SANS`, `FONT_SERIF` or `FONT_MONO`, plus `FONT_ITALIC` and `FONT_BOLD`.
     pub font: u8,
 }
@@ -80,11 +82,12 @@ pub const FONT_MONO: u8 = 2;
 pub const FONT_ITALIC: u8 = 4;
 pub const FONT_BOLD: u8 = 8;
 
-/// How a text is set beyond its frame: the width it must fit in (0 for none, in the frame's
-/// units) and its font (see `Text::font`).
+/// How a text is set beyond its frame: the widths it must fit in and wrap at (0 for none, in
+/// the frame's units) and its font (see `Text::font`).
 #[derive(Clone, Copy, Default)]
 pub(crate) struct TextStyle {
     pub fit: f64,
+    pub wrap: f64,
     pub font: u8,
 }
 
@@ -512,12 +515,23 @@ impl<'a> World<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn push_text(&mut self, pos: P, rotation: f64, height: f64, width: f64, (halign, valign): (u8, u8), text: String, m: &Affine, pen: Pen) {
+    pub(crate) fn push_text(&mut self, pos: P, rotation: f64, height: f64, width: f64, align: (u8, u8), text: String, m: &Affine, pen: Pen) {
+        self.styled_text(pos, rotation, height, width, align, text, TextStyle::default(), m, pen);
+    }
+
+    /// MTEXT, its lines word-wrapped at `wrap` (0 for none).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn mtext(&mut self, pos: P, rotation: f64, height: f64, wrap: f64, align: (u8, u8), text: String, m: &Affine, pen: Pen) {
+        self.styled_text(pos, rotation, height, 1.0, align, text, TextStyle { wrap: wrap.max(0.0), ..TextStyle::default() }, m, pen);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn styled_text(&mut self, pos: P, rotation: f64, height: f64, width: f64, (halign, valign): (u8, u8), text: String, style: TextStyle, m: &Affine, pen: Pen) {
         if text.trim().is_empty() || height <= 0.0 {
             return;
         }
         let (s, c) = rotation.sin_cos();
-        self.text_frame(pos, [c * height * width, s * height * width], [-s * height, c * height], (halign, valign), text, TextStyle::default(), m, pen);
+        self.text_frame(pos, [c * height * width, s * height * width], [-s * height, c * height], (halign, valign), text, style, m, pen);
     }
 
     /// Text in glyph space spanned by `x` and `up` (see [`Text`]), which need not be perpendicular.
@@ -527,8 +541,9 @@ impl<'a> World<'a> {
     pub(crate) fn text_frame(&mut self, pos: P, x: P, up: P, (halign, valign): (u8, u8), text: String, style: TextStyle, m: &Affine, pen: Pen) {
         if !text.trim().is_empty() {
             let len = |v: P| v[0].hypot(v[1]);
-            let fit = if len(x) > 0.0 { style.fit * len(m.linear(x)) / len(x) } else { 0.0 };
-            let text = Text { pos: m.apply(pos), x: m.linear(x), up: m.linear(up), halign, valign, text, color: pen.color, layer: pen.layer, fit, font: style.font };
+            let scale = if len(x) > 0.0 { len(m.linear(x)) / len(x) } else { 0.0 };
+            let (fit, wrap) = (style.fit * scale, style.wrap * scale);
+            let text = Text { pos: m.apply(pos), x: m.linear(x), up: m.linear(up), halign, valign, text, color: pen.color, layer: pen.layer, fit, wrap, font: style.font };
             self.texts.push(text);
         }
     }
@@ -1167,7 +1182,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                     None => r.f(50, 0.0),
                 };
                 let align = mtext_align(r.i(71, 1));
-                w.push_text(r.point(10), rotation, r.f(40, 1.0), 1.0, align, parse::mtext_plain(&raw), &m, pen);
+                w.mtext(r.point(10), rotation, r.f(40, 1.0), r.f(41, 0.0), align, parse::mtext_plain(&raw), &m, pen);
             }
             "INSERT" => {
                 let Some(block) = self.blocks.get(&r.name(2)) else { return };
@@ -1857,6 +1872,12 @@ mod tests {
         let t = &d.texts[0];
         assert_eq!((t.text.as_str(), t.halign, t.valign), ("Ø10", 1, 2));
         assert!(close(t.up, [0.0, -2.0]));
+    }
+
+    #[test]
+    fn mtext_wraps_at_reference_width() {
+        let d = decode(&entities(&[(0, "MTEXT"), (10, "0"), (20, "0"), (40, "2"), (41, "30"), (1, "Some words")])).unwrap();
+        assert_eq!((d.texts[0].wrap, d.texts[0].fit), (30.0, 0.0));
     }
 
     #[test]

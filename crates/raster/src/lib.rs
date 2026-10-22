@@ -317,6 +317,12 @@ impl DxfDoc {
         self.drawing.texts.iter().map(|t| t.fit).collect()
     }
 
+    /// Width each text's lines are word-wrapped at, in drawing units; 0 for none.
+    #[wasm_bindgen(js_name = textWraps)]
+    pub fn text_wraps(&self) -> Vec<f64> {
+        self.drawing.texts.iter().map(|t| t.wrap).collect()
+    }
+
     /// Font of each text: family (0 sans-serif, 1 serif, 2 monospace) plus 4 for italic and 8 for bold.
     #[wasm_bindgen(js_name = textFonts)]
     pub fn text_fonts(&self) -> Vec<u8> {

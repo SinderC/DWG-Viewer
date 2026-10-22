@@ -207,22 +207,22 @@ function texts(doc: DxfDoc): Text[] {
   const colors = doc.textColors();
   const layers = doc.textLayers();
   const fits = doc.textFits();
+  const wraps = doc.textWraps();
   const fonts = doc.textFonts();
   const measure = document.createElement('canvas').getContext('2d')!;
   return doc.textStrings().map((string, i) => {
     const style = (fonts[i] & 4 ? 'italic ' : '') + (fonts[i] & 8 ? 'bold ' : '');
     const family = FAMILY[fonts[i] & 3] ?? FAMILY[0];
     const [x, y, ax, ay, ux, uy, halign, valign] = data.subarray(8 * i, 8 * i + 8);
-    const lines = string.split('\n');
+    // Measured at a height of 100, a string's drawn width is its measured width per 100 × |x|.
+    measure.font = `${style}${100 * EM_PER_CAP}px ${family}`;
+    const width = (s: string) => (measure.measureText(s).width / 100) * Math.hypot(ax, ay);
+    const lines = string.split('\n').flatMap((l) => (wraps[i] > 0 ? wrap(l, wraps[i], width) : [l]));
     const longest = Math.max(...lines.map((l) => l.length));
-    // Text with a fit width shrinks to it: measured at a height of 100, the drawn width is that per 100 × |x|.
+    // Text with a fit width shrinks to it.
     const cap = Math.hypot(ux, uy);
     let height = cap;
-    if (fits[i] > 0) {
-      measure.font = `${style}${100 * EM_PER_CAP}px ${family}`;
-      const wide = Math.max(...lines.map((l) => measure.measureText(l).width)) / 100;
-      height *= Math.min(1, fits[i] / (wide * Math.hypot(ax, ay)));
-    }
+    if (fits[i] > 0) height *= Math.min(1, fits[i] / Math.max(...lines.map(width)));
     return {
       x,
       y,
@@ -240,6 +240,23 @@ function texts(doc: DxfDoc): Text[] {
       layer: layers[i],
     };
   });
+}
+
+/** Splits `line` at spaces into lines no wider than `max` where possible; a word wider than `max` keeps a line to itself. */
+function wrap(line: string, max: number, width: (s: string) => number): string[] {
+  const out: string[] = [];
+  let current = '';
+  for (const word of line.split(' ')) {
+    const next = current ? `${current} ${word}` : word;
+    if (current && width(next) > max) {
+      out.push(current);
+      current = word;
+    } else {
+      current = next;
+    }
+  }
+  out.push(current);
+  return out;
 }
 
 /**

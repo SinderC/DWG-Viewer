@@ -165,7 +165,7 @@ impl<'a> Builder<'a> {
             EntityType::AttributeEntity(a) => attribute(w, a, &m, pen),
             EntityType::MText(t) => {
                 let align = dxf::mtext_align(t.attachment_point as i64);
-                w.push_text(xy(t.insertion_point), t.rotation, t.height, 1.0, align, parse::mtext_plain(&t.value), &m, pen);
+                w.mtext(xy(t.insertion_point), t.rotation, t.height, t.rectangle_width, align, parse::mtext_plain(&t.value), &m, pen);
             }
             EntityType::Insert(i) => {
                 let base = self.doc.block_records.get(&i.block_name).map_or([0.0; 2], |b| xy(b.base_point));
