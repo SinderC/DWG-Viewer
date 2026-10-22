@@ -51,6 +51,7 @@ pub fn decode(data: &[u8], page: u32) -> Result<(dxf::Drawing, u32), String> {
     }
     let info = d.info(wrapped);
     d.place_images();
+    d.world.drop_repeated_segments();
     d.world.finish("mm", info).map(|drawing| (drawing, pages))
 }
 
@@ -767,6 +768,15 @@ mod tests {
         assert_eq!(d.paths[1].color, 0xFF0000);
         let names: Vec<_> = d.layers.iter().map(|l| l.name.as_str()).collect();
         assert_eq!(names, ["Pen 1", "Pen 2"]);
+    }
+
+    #[test]
+    fn repeated_segments() {
+        // The second stroke retraces the first edge backwards, then goes on; pen 2 may repeat it.
+        let d = decode(b"IN;SP1;PU0,0;PD400,0,400,400;PU400,0;PD0,0,0,400;SP2;PU0,0;PD400,0;");
+        let paths: Vec<_> = d.paths.iter().map(|p| (p.color, p.points.len())).collect();
+        assert_eq!(paths, [(FOREGROUND, 3), (FOREGROUND, 2), (0xFF0000, 2)]);
+        assert_eq!(d.paths[1].points, [[0.0, 10.0], [0.0, 0.0]]);
     }
 
     #[test]
