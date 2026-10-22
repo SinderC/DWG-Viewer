@@ -26,6 +26,7 @@ export class Minimap {
   ) {
     this.ctx = canvas.getContext('2d')!;
     canvas.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
       canvas.setPointerCapture(e.pointerId);
       // The outline drags from where it was grabbed; elsewhere, the view springs there and keeps following.
       const p = this.point(e);

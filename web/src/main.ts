@@ -226,20 +226,20 @@ function paintHits(ctx: CanvasRenderingContext2D, view: View): void {
   });
 }
 
-function runFind(): void {
+/** Searches again; `go` moves to match `index`, otherwise only the counter and highlights update. */
+function runFind(index = 0, go = true): void {
   const doc = current?.doc;
   find.hits = doc?.kind === 'vector' ? doc.findText(findInput.value.trim()) : [];
-  find.index = 0;
-  showHit();
+  showHit(index, go);
 }
 
-/** Moves to match `index` (wrapping around) and updates the counter. */
-function showHit(index = find.index): void {
+/** Moves to match `index` (wrapping around), unless not `go`, and updates the counter. */
+function showHit(index = find.index, go = true): void {
   const n = find.hits.length;
   find.index = n ? (index + n) % n : 0;
   findCount.textContent = !findInput.value.trim() ? '' : n ? `${find.index + 1} of ${n}` : 'No match';
   const hit = find.hits[find.index];
-  if (hit) {
+  if (hit && go) {
     const xs = hit.corners.map((c) => c[0]);
     const ys = hit.corners.map((c) => c[1]);
     const [x, y] = [Math.min(...xs), Math.min(...ys)];
@@ -263,7 +263,7 @@ function toggleFind(open = !findBar.classList.contains('open')): void {
 }
 
 findButton.addEventListener('click', () => toggleFind());
-findInput.addEventListener('input', runFind);
+findInput.addEventListener('input', () => runFind());
 findInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') showHit(find.index + (e.shiftKey ? -1 : 1));
   else if (e.key === 'Escape') toggleFind(false);
@@ -279,6 +279,7 @@ const viewer = new Viewer(canvas, $<HTMLCanvasElement>('overlay'), paintOverlay,
   const zoom = viewer.document?.kind === 'vector' ? viewer.fitRatio() : view.scale;
   zoomLabel.textContent = `${Math.round(zoom * 100)}%`;
   minimap.update();
+  hover();
 });
 const minimapEl = $('minimap');
 const minimap = new Minimap(minimapEl, minimapEl.querySelector('canvas')!, viewer);
@@ -417,6 +418,7 @@ function syncLayers(): void {
   layerCount.textContent = `${on} of ${layerRows.length} shown`;
   viewer.redraw();
   minimap.invalidate();
+  if (findBar.classList.contains('open')) runFind(find.index, false);
 }
 
 function filterLayers(): void {
@@ -445,6 +447,8 @@ function showError(name: string, err: unknown): void {
 function showPage(file: OpenFile, page: number): void {
   try {
     const doc = file.plugin.open(file.bytes, page);
+    // The viewer owns (and frees) the document from here, so a failure below cannot leak it.
+    viewer.setDocument(doc);
     current = { ...file, page, pageCount: doc.pageCount, info: fileInfo(file, doc, page), formatInfo: doc.info, doc };
     title.textContent = title.title = file.name;
     document.title = `${file.name} – Open Drawing Viewer`;
@@ -465,7 +469,6 @@ function showPage(file: OpenFile, page: number): void {
     pageLabel.textContent = `${page + 1} / ${doc.pageCount}`;
     start.hidden = true;
     document.body.classList.add('has-doc');
-    viewer.setDocument(doc);
     minimap.invalidate();
     if (findBar.classList.contains('open')) runFind();
     updateToolbarEdges();
@@ -482,13 +485,18 @@ function turnPage(delta: number): void {
 /** Files above this size get a progress toast; decoding blocks the page, so it must be painted first. */
 const SLOW_FILE = 1 << 20;
 
+/** Bumped by each openFile, so a slow load finishing after a later one does not replace it. */
+let loading = 0;
+
 async function openFile(file: File): Promise<void> {
+  const id = ++loading;
   try {
     if (file.size > SLOW_FILE) {
       toast(`Opening ${file.name}…`, { ms: 0 });
       await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
     }
     const bytes = new Uint8Array(await file.arrayBuffer());
+    if (id !== loading) return;
     const plugin = findPlugin(file.name, bytes);
     if (!plugin) throw new Error('Unsupported file format');
     showPage({ name: file.name, bytes, plugin }, 0);
@@ -521,22 +529,23 @@ function showCoords(e: PointerEvent): void {
   coords.hidden = false;
 }
 
-/** The pointer's last position on the canvas, so Shift can re-snap it without the pointer moving. */
-let pointer: { x: number; y: number; pixel: number } | null = null;
+/** The pointer's last position on the canvas and Shift, so the point being placed follows view changes and Shift. */
+let pointer: { clientX: number; clientY: number; shiftKey: boolean } | null = null;
 
-/** Moves the point being placed to the pointer, snapped unless `free`. */
-function hover(free: boolean): void {
+/** Moves the point being placed to the pointer, snapped unless Shift is down. */
+function hover(): void {
   if (!measure.tool || !pointer) return;
   // A finished measurement that is not kept stays on screen until the next click.
   if (measure.points.length === POINTS[measure.tool]) return;
-  ({ point: measure.hover, snapped: measure.snapped } = snap(pointer, pointer.pixel, free));
+  const p = viewer.toDrawing(pointer);
+  ({ point: measure.hover, snapped: measure.snapped } = snap(p, p.pixel, pointer.shiftKey));
   viewer.redrawOverlay();
 }
 
 canvas.addEventListener('pointermove', (e) => {
   showCoords(e);
-  pointer = viewer.toDrawing(e);
-  hover(e.shiftKey);
+  pointer = { clientX: e.clientX, clientY: e.clientY, shiftKey: e.shiftKey };
+  hover();
 });
 canvas.addEventListener('pointerleave', () => {
   coords.hidden = true;
@@ -546,7 +555,10 @@ canvas.addEventListener('pointerleave', () => {
 });
 for (const type of ['keydown', 'keyup'] as const) {
   document.addEventListener(type, (e) => {
-    if (e.key === 'Shift') hover(type === 'keydown');
+    if (e.key === 'Shift' && pointer) {
+      pointer.shiftKey = type === 'keydown';
+      hover();
+    }
   });
 }
 viewer.onTap = (e) => {

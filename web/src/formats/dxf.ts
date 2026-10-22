@@ -580,8 +580,9 @@ function layers(doc: DxfDoc): Layer[] {
  * again. Raster images stay in WASM and are freed with the returned document.
  */
 export function vectorDocument(doc: DxfDoc): VectorDocument {
+  let pictures: Image[] = [];
   try {
-    const pictures = images(doc);
+    pictures = images(doc);
     const areas = fills(doc);
     const [paths, snaps] = strokes(doc);
     const labels = texts(doc);
@@ -672,6 +673,9 @@ export function vectorDocument(doc: DxfDoc): VectorDocument {
       snap: (x, y, radius) => snaps.nearest(x, y, radius, (layer) => layerList[layer].visible),
       free: () => pictures.forEach((image) => image.raster.free()),
     };
+  } catch (err) {
+    pictures.forEach((image) => image.raster.free());
+    throw err;
   } finally {
     doc.free();
   }

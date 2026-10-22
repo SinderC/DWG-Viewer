@@ -127,6 +127,10 @@ export class Viewer {
     this.doc?.free();
     this.doc = doc;
     this.stop();
+    // A drag or pinch on the previous document does not carry over.
+    this.pointers.clear();
+    this.drag = this.press = this.pinch = this.held = null;
+    this.canvas.classList.remove('dragging');
     this.syncSize();
     this.setView(this.fitView());
   }
@@ -389,7 +393,17 @@ export class Viewer {
   }
 
   private paint(now: number): void {
-    // `frame` stays set until the drawing is done, so view changes made here don't queue another frame.
+    // `frame` stays set until the drawing is done, so view changes made here don't queue another frame;
+    // it is cleared even if drawing throws, or no frame would ever be queued again.
+    try {
+      this.paintFrame(now);
+    } finally {
+      this.frame = 0;
+    }
+    if (this.motion) this.redraw();
+  }
+
+  private paintFrame(now: number): void {
     if (this.motion) {
       const dt = Math.min(0.05, Math.max(0, (now - this.lastTick) / 1000));
       this.lastTick = now;
@@ -412,8 +426,6 @@ export class Viewer {
     this.overlayCtx.setTransform(1, 0, 0, 1, 0, 0);
     this.overlayCtx.clearRect(0, 0, width, height);
     if (this.doc) this.paintOverlay(this.overlayCtx, this.view);
-    this.frame = 0;
-    if (this.motion) this.redraw();
   }
 
   /** Matches the canvas' backing store to its CSS size in device pixels. Returns true if it changed. */
@@ -428,13 +440,13 @@ export class Viewer {
   }
 
   /** Drawing coordinates under the mouse, and the size of one CSS pixel in drawing units. */
-  toDrawing(e: MouseEvent): { x: number; y: number; pixel: number } {
+  toDrawing(e: Pick<MouseEvent, 'clientX' | 'clientY'>): { x: number; y: number; pixel: number } {
     const [px, py] = this.devicePoint(e);
     const { scale, x, y } = this.view;
     return { x: x + px / scale, y: y + py / scale, pixel: (window.devicePixelRatio || 1) / scale };
   }
 
-  private devicePoint(e: MouseEvent): [number, number] {
+  private devicePoint(e: Pick<MouseEvent, 'clientX' | 'clientY'>): [number, number] {
     const rect = this.canvas.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
     return [(e.clientX - rect.left) * dpr, (e.clientY - rect.top) * dpr];
