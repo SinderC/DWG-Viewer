@@ -307,7 +307,7 @@ fn build(s: &mut Sheet) {
             "\\LUnderline\\l \\OOver\\o \\KStrike\\k {\\H2x;Big} {\\C1;red} {\\c16744448;rgb}\\P\
              Stack 1\\S1/2; 3\\S3#4; x\\Sa^b;\\P\
              {\\fArial|b1|i0;Arial bold} {\\fArial|b0|i1;italic} {\\Q15;oblique}\\P\
-             {\\T2;tracked} {\\W2;wide} {\\W0.5;narrow} \\U+00B0 \\U+2300",
+             {\\T2;tracked} {\\W2;wide} {\\W0.5;narrow} \\U+00B0 \\U+2205",
             o.p(5., 80.),
         );
         m.height = 4.;

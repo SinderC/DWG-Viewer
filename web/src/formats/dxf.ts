@@ -57,8 +57,9 @@ const STACK = '\uE002';
 const STACK_OVER = '\uE003';
 const STACK_KIND = '\uE004';
 const STACK_END = '\uE005';
+/** How far past a `#` stack's top its bottom starts, in text heights. */
+const STACK_SLASH = 0.35;
 /** Stacked text size, in the run's heights. */
-const STACK_SIZE = 0.7;
 
 interface RunStyle {
   /** Height and width factors, tracking factor, oblique angle in degrees. */
@@ -404,12 +405,11 @@ function layoutRich(lines: Run[][], max: number, style: string, family: string, 
   const measured = (run: Run): Run => {
     const h = run.style.height;
     if (run.bottom === undefined) return { ...run, width: widthOf(run, run.text, h) };
-    const small = h * STACK_SIZE;
-    const width = run.kind === '#' ? widthOf(run, `${run.text}/${run.bottom}`, small) : Math.max(widthOf(run, run.text, small), widthOf(run, run.bottom, small));
+    const width = run.kind === '#' ? widthOf(run, run.text, h) + STACK_SLASH * h + widthOf(run, run.bottom, h) : Math.max(widthOf(run, run.text, h), widthOf(run, run.bottom, h));
     return { ...run, width };
   };
   const out: RichLine[] = [];
-  const finish = (runs: Run[]) => out.push({ runs, width: runs.reduce((a, r) => a + r.width, 0), height: Math.max(1e-9, ...runs.map((r) => r.style.height)) });
+  const finish = (runs: Run[]) => out.push({ runs, width: runs.reduce((a, r) => a + r.width, 0), height: Math.max(1e-9, ...runs.map((r) => r.style.height * (r.bottom === undefined ? 1 : 2))) });
   for (const line of lines) {
     // Words keep their trailing space, so a wrapped line can be split between any two.
     const pieces = line.flatMap((run) => (run.bottom === undefined && max > 0 ? run.text.split(/(?<= )/).map((text) => ({ ...run, text })) : [run])).map(measured);
@@ -466,14 +466,24 @@ function drawRich(ctx: CanvasRenderingContext2D, t: Text, px: number, invert: bo
       ctx.transform(stretch, 0, -Math.tan((oblique * Math.PI) / 180), 1, x, y);
       const w = (run.width * px) / stretch;
       if (run.bottom !== undefined) {
-        font(h * STACK_SIZE);
+        // Full-size parts, the bottom on the baseline, as AutoCAD draws them.
+        font(h);
         if (run.kind === '#') {
-          ctx.fillText(`${run.text}/${run.bottom}`, 0, -h * 0.25);
+          // Top raised on the left, a diagonal slash, the bottom on the baseline to the right.
+          const top = ctx.measureText(run.text).width;
+          ctx.fillText(run.text, 0, -h * 0.96);
+          ctx.fillText(run.bottom, top + STACK_SLASH * h, 0);
+          ctx.beginPath();
+          ctx.moveTo(top - 0.4 * h, -0.2 * h);
+          ctx.lineTo(top + 0.7 * h, -1.8 * h);
+          ctx.lineWidth = Math.max(1, h * 0.04);
+          ctx.strokeStyle = ctx.fillStyle;
+          ctx.stroke();
         } else {
           const centre = (s: string) => (run.kind === '^' ? 0 : (w - ctx.measureText(s).width) / 2);
-          ctx.fillText(run.text, centre(run.text), -h * 0.55);
-          ctx.fillText(run.bottom, centre(run.bottom), h * 0.35);
-          if (run.kind === '/') ctx.fillRect(0, -h * 0.45, w, Math.max(1, h * 0.06));
+          ctx.fillText(run.text, centre(run.text), -h * 1.36);
+          ctx.fillText(run.bottom, centre(run.bottom), 0);
+          if (run.kind === '/') ctx.fillRect(0, -h * 1.2, w, Math.max(1, h * 0.04));
         }
       } else {
         font(h);

@@ -248,7 +248,8 @@ pub fn mtext_rich(s: &str, height: f64) -> String {
                     'T' => cur.tracking = number(&arg()).unwrap_or(cur.tracking),
                     'Q' => cur.oblique = arg().trim().parse().unwrap_or(cur.oblique),
                     'C' => cur.color = arg().trim().parse::<i64>().ok().filter(|i| (1..=255).contains(i)).map(super::aci),
-                    'c' => cur.color = arg().trim().parse::<u32>().ok().map(|v| v & 0xFF_FFFF),
+                    // \c is 0xBBGGRR.
+                    'c' => cur.color = arg().trim().parse::<u32>().ok().map(|v| (v & 0xFF) << 16 | (v & 0xFF00) | (v >> 16 & 0xFF)),
                     'f' | 'F' => cur.font = font(&arg()),
                     'S' => {
                         let a = arg();
@@ -338,6 +339,8 @@ mod tests {
         let r = mtext_rich("a{\\H2x;b}c \\S1/2;", 2.0);
         assert_eq!(r, format!("a{STYLE}2;1;1;0;-;0;0{STYLE_END}b{STYLE}1;1;1;0;-;0;0{STYLE_END}c {STACK}1{STACK_OVER}2{STACK_KIND}/{STACK_END}"));
         assert!(mtext_rich("{\\H5;x}", 2.5).starts_with(&format!("{STYLE}2;")));
+        // \c is BGR: 16744448 = 0xFF8000 is blue (0, 128, 255).
+        assert!(mtext_rich("{\\c16744448;x}", 2.5).starts_with(&format!("{STYLE}1;1;1;0;0080ff;")));
     }
 
     #[test]
