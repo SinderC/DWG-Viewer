@@ -90,6 +90,37 @@ pub(crate) enum Dim {
     Jogged { centre: P, chord: P, jog: P, shown_centre: P },
 }
 
+/// Estimated width of dimension text: Arial digits are 0.78 of the text height wide.
+fn text_width(text: &str, s: &DimStyle) -> f64 {
+    0.78 * s.text * text.chars().count() as f64
+}
+
+/// A radius or diameter line as AutoCAD draws it: from `from` (the centre, or for a diameter the
+/// chord end away from the text) through `to` on the curve to the far end of the text, which sits
+/// on the line where the file puts it (by default just past `to`), above it with DIMTAD. A radius
+/// has its arrow at `to`, pointing inward if the text is outside; a diameter at `from`, pointing out.
+#[allow(clippy::too_many_arguments)]
+fn radial(w: &mut World, from: P, to: P, diameter: bool, text: Option<String>, t: &DimText, s: &DimStyle, m: &Affine, pen: Pen) {
+    let u = unit(sub(to, from));
+    let reach = len(sub(to, from));
+    let width = text.as_deref().map_or(0.0, |text| text_width(text, s));
+    let along = t.at.map_or(reach + 2.0 * s.arrow + width / 2.0, |at| dot(sub(at, from), u));
+    // A radius reaches its arrow at least; a diameter stops at the text.
+    let end = along + width / 2.0;
+    w.path(vec![from, add(from, mul(u, if diameter { end } else { end.max(reach) }))], m, pen);
+    let (tip, out) = match (diameter, along > reach) {
+        (true, _) => (from, mul(u, -1.0)),
+        (false, true) => (to, mul(u, -1.0)),
+        (false, false) => (to, u),
+    };
+    w.arrowhead(&m.then(&arrow(tip, sub(tip, out), s.arrow)), pen);
+    let Some(text) = text else { return };
+    let rotation = t.rotation.unwrap_or(if s.horizontal { 0.0 } else { readable(angle(u)) });
+    let lift = if s.above && !s.horizontal { s.gap + s.text / 2.0 } else { 0.0 };
+    let at = add(add(from, mul(u, along)), mul(polar(readable(angle(u)) + FRAC_PI_2), lift));
+    w.push_text(at, rotation, s.text, 1.0, (1, 2), text, m, pen);
+}
+
 /// A dimension's text: user text (`<>` is the measurement, "" the measurement alone, " " none),
 /// its middle point and rotation if the file gives them.
 pub(crate) struct DimText<'a> {
@@ -202,21 +233,17 @@ pub(crate) fn draw(w: &mut World, d: &Dim, t: &DimText, s: &DimStyle, m: &Affine
             label(w, s.length(t.user, "", dot(sub(ext2, ext1), dir).abs()), beside(mul(add(f1, f2), 0.5), along), along);
         }
         Dim::Radius { centre, on_curve } => {
-            let u = unit(sub(on_curve, centre));
-            let at = t.at.unwrap_or(add(on_curve, mul(u, 2.0 * s.arrow + s.text)));
-            line(w, vec![at, on_curve]);
-            head(w, on_curve, unit(sub(on_curve, at)));
-            label(w, s.length(t.user, "R", len(sub(on_curve, centre))), at, angle(u));
+            let text = s.length(t.user, "R", len(sub(on_curve, centre)));
+            radial(w, centre, on_curve, false, text, t, s, m, pen);
         }
         Dim::Diameter { a, b } => {
-            let centre = mul(add(a, b), 0.5);
-            dimension_line(w, a, b, s, m, pen);
-            if let Some(at) = t.at.filter(|&at| len(sub(at, centre)) > len(sub(a, centre))) {
-                let end = if len(sub(at, a)) < len(sub(at, b)) { a } else { b };
-                line(w, vec![end, at]);
-            }
-            let along = angle(sub(b, a));
-            label(w, s.length(t.user, "Ø", len(sub(b, a))), beside(centre, along), along);
+            // From the chord end away from the text.
+            let text = s.length(t.user, "Ø", len(sub(b, a)));
+            let (from, to) = match t.at {
+                Some(at) if len(sub(at, a)) < len(sub(at, b)) => (b, a),
+                _ => (a, b),
+            };
+            radial(w, from, to, true, text, t, s, m, pen);
         }
         Dim::Angular2 { l1, l2, arc } => {
             let (d1, d2) = (unit(sub(l1[1], l1[0])), unit(sub(l2[1], l2[0])));
@@ -274,8 +301,8 @@ pub(crate) fn draw(w: &mut World, d: &Dim, t: &DimText, s: &DimStyle, m: &Affine
             let Some(text) = s.length(t.user, "", (feature[j] - origin[j]).abs()) else { return };
             // The text sits past the leader end (or where the file puts it); AutoCAD then runs the
             // leader under the whole text, above it with DIMTAD, doglegging over 2 arrow sizes that
-            // end 2 arrow sizes before the text. Digits are taken as 0.78 of the height wide (Arial).
-            let width = 0.78 * s.text * text.chars().count() as f64;
+            // end 2 arrow sizes before the text.
+            let width = text_width(&text, s);
             let at = t.at.unwrap_or(pt(leader[k] + sign * width / 2.0, leader[j]));
             // Text reads along the leader, so its up is −X on an X ordinate and +Y on a Y ordinate.
             let below = if s.above { s.gap + s.text / 2.0 } else { 0.0 };
@@ -291,11 +318,22 @@ pub(crate) fn draw(w: &mut World, d: &Dim, t: &DimText, s: &DimStyle, m: &Affine
             w.push_text(at, t.rotation.unwrap_or(along), s.text, 1.0, (1, 2), text, m, pen);
         }
         Dim::Jogged { centre, chord, jog, shown_centre } => {
+            // A zig of 2.5 arrow sizes at 45° to the radius, centred on the jog point and leaning
+            // away from the shown centre, between a line to the shown centre and one to the arrow.
             let u = unit(sub(chord, centre));
-            let foot = add(centre, mul(u, dot(sub(jog, centre), u)));
-            line(w, vec![shown_centre, jog, foot, chord]);
-            head(w, chord, u);
-            label(w, s.length(t.user, "R", len(sub(chord, centre))), add(chord, mul(u, 2.0 * s.arrow + s.text)), angle(u));
+            let n = [-u[1], u[0]];
+            let side = if dot(sub(shown_centre, centre), n) > 0.0 { -1.0 } else { 1.0 };
+            let half = mul(add(u, mul(n, side)), 2.5 * s.arrow / 2.0 / std::f64::consts::SQRT_2);
+            let (low, high) = (sub(jog, half), add(jog, half));
+            line(w, vec![shown_centre, high, low, chord]);
+            let along = unit(sub(chord, low));
+            head(w, chord, along);
+            // AutoCAD centres the text above the segment to the arrow, wherever the file puts it.
+            let mid = mul(add(low, chord), 0.5);
+            let at = add(mid, mul(polar(readable(angle(along)) + FRAC_PI_2), if s.above { s.gap + s.text / 2.0 } else { 0.0 }));
+            if let Some(text) = s.length(t.user, "R", len(sub(chord, centre))) {
+                w.push_text(at, t.rotation.unwrap_or(readable(angle(along))), s.text, 1.0, (1, 2), text, m, pen);
+            }
         }
     }
 }
@@ -444,6 +482,47 @@ mod tests {
         let round = |p: &P| p.map(|v| (v * 100.0).round() / 100.0);
         assert_eq!(w.paths[0].points.iter().map(round).collect::<Vec<_>>(), [[90.63, 60.0], [116.05, 60.0], [121.05, 58.13], [129.95, 58.13]]);
         assert_eq!(w.texts[0].text, "45");
+    }
+
+    /// The extended baseline's radius and diameter (r = 25) as AutoCAD drew them with ISO-25.
+    #[test]
+    fn radius_and_diameter_run_from_the_centre_or_far_end_to_the_text() {
+        let s = DimStyle { arrow: 2.5, text: 2.5, gap: 0.625, above: true, horizontal: false, dec: 0, ..DimStyle::default() };
+        let pen = Pen { color: 0, layer: 0, width: 0.0, dash: 0 };
+        let round = |p: P| p.map(|v| (v * 100.0).round() / 100.0);
+        let k = std::f64::consts::FRAC_PI_4.cos();
+        // Radius, text outside at 32√2 along: the line runs from the centre past the text "R25".
+        let mut w = World::new(Vec::new());
+        let t = DimText { user: "", at: Some([32.0, 32.0]), rotation: None };
+        draw(&mut w, &Dim::Radius { centre: [0.0; 2], on_curve: [25.0 * k, 25.0 * k] }, &t, &s, &Affine::IDENTITY, pen);
+        let end = 32.0 + 0.78 * 2.5 * 1.5 * k;
+        assert_eq!(w.paths[0].points.iter().map(|&p| round(p)).collect::<Vec<_>>(), [[0.0, 0.0], round([end, end])]);
+        assert_eq!(w.fills.len(), 1, "one arrow");
+        // Above the line: lifted by gap + half the height, square to it.
+        assert_eq!(round(w.texts[0].pos), round([32.0 - 1.875 * k, 32.0 + 1.875 * k]));
+        // Diameter, text inside near b: the line starts at a, the only arrow there.
+        let mut w = World::new(Vec::new());
+        let t = DimText { user: "", at: Some([3.0, 4.0]), rotation: None };
+        draw(&mut w, &Dim::Diameter { a: [-15.0, -20.0], b: [15.0, 20.0] }, &t, &s, &Affine::IDENTITY, pen);
+        // It ends past the text ("Ø50", 5 along from the centre), short of b.
+        let end = 25.0 + 5.0 + 0.78 * 2.5 * 1.5;
+        assert_eq!(w.paths[0].points.iter().map(|&p| round(p)).collect::<Vec<_>>(), [[-15.0, -20.0], round([-15.0 + 0.6 * end, -20.0 + 0.8 * end])]);
+        assert_eq!(w.fills.len(), 1, "one arrow");
+        assert_eq!(w.texts[0].text, "Ø50");
+    }
+
+    /// The extended baseline's jogged radius as AutoCAD drew it: zig corners measured at
+    /// (59.4, 41.9) and (60.6, 48.1) around the jog point (60, 45).
+    #[test]
+    fn jogged_radius_zigs_around_the_jog_point() {
+        let s = DimStyle { arrow: 2.5, text: 2.5, gap: 0.625, above: true, dec: 0, ..DimStyle::default() };
+        let mut w = World::new(Vec::new());
+        let d = Dim::Jogged { centre: [20.0, 15.0], chord: [76.0, 57.0], jog: [60.0, 45.0], shown_centre: [40.0, 25.0] };
+        let t = DimText { user: "", at: Some([42.0, 30.0]), rotation: None };
+        draw(&mut w, &d, &t, &s, &Affine::IDENTITY, Pen { color: 0, layer: 0, width: 0.0, dash: 0 });
+        let round = |p: &P| p.map(|v| (v * 100.0).round() / 100.0);
+        assert_eq!(w.paths[0].points.iter().map(round).collect::<Vec<_>>(), [[40.0, 25.0], [60.44, 48.09], [59.56, 41.91], [76.0, 57.0]]);
+        assert_eq!(w.texts[0].text, "R70");
     }
 
     #[test]
