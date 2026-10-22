@@ -297,7 +297,7 @@ fn build(s: &mut Sheet) {
         q.oblique_angle = 20f64.to_radians();
         let mut b = Text::with_value("Backward", o.p(120., 40.)).with_height(5.);
         b.generation_flags = 2;
-        let mut u = Text::with_value("Upside down", o.p(125., 25.)).with_height(5.);
+        let mut u = Text::with_value("Upside down", o.p(100., 30.)).with_height(5.);
         u.generation_flags = 4;
         let c = Text::with_value("%%c25 %%d %%p0.1 %%uunder%%u %%oover%%o", o.p(5., 80.)).with_height(3.5);
         [r, w, q, b, u, c].into_iter().map(EntityType::Text).collect()

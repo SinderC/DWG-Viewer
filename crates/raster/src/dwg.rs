@@ -144,7 +144,7 @@ macro_rules! attribute {
         let a = $a;
         let (h, v) = (a.horizontal_alignment as i64, a.vertical_alignment as i64);
         let (pos, rotation, align) = dxf::text_anchor(h, v, xy(a.insertion_point), xy(a.alignment_point), a.rotation);
-        let m = $m.then(&Affine::extrusion(a.normal.z)).then(&dxf::text_mirror(a.text_generation_flags.into(), pos, rotation));
+        let m = $m.then(&Affine::extrusion(a.normal.z)).then(&dxf::text_shape(a.text_generation_flags.into(), a.oblique_angle, pos, rotation));
         $w.push_text(pos, rotation, a.height, a.width_factor, align, parse::text_rich($value), &m, $pen);
     }};
 }
@@ -303,7 +303,7 @@ impl<'a> Builder<'a> {
                 let second = t.alignment_point.unwrap_or(t.insertion_point);
                 let (h, v) = (t.horizontal_alignment as i64, t.vertical_alignment as i64);
                 let (pos, rotation, align) = dxf::text_anchor(h, v, xy(t.insertion_point), xy(second), t.rotation);
-                let m = ocs(t.normal).then(&dxf::text_mirror(t.generation_flags.into(), pos, rotation));
+                let m = ocs(t.normal).then(&dxf::text_shape(t.generation_flags.into(), t.oblique_angle, pos, rotation));
                 w.push_text(pos, rotation, t.height, t.width_factor, align, parse::text_rich(&t.value), &m, pen);
             }
             EntityType::AttributeEntity(a) => attribute(w, a, &m, pen),

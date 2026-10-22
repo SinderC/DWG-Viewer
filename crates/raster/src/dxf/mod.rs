@@ -1307,13 +1307,13 @@ const DIM_VARS: [(i32, &str); 13] = [
     (40, "$DIMSCALE"),
 ];
 
-/// Mirrors text at `at` along its baseline (at `rotation`) for TEXT generation flag 2 (backward),
-/// and across it for 4 (upside down).
-pub(crate) fn text_mirror(flags: i64, at: P, rotation: f64) -> Affine {
+/// Slants text at `at` by `oblique` (radians, from upright towards its baseline at `rotation`), then
+/// mirrors it along the baseline for TEXT generation flag 2 (backward) and across it for 4 (upside down).
+pub(crate) fn text_shape(flags: i64, oblique: f64, at: P, rotation: f64) -> Affine {
     let flip = |bit: i64| if flags & bit != 0 { -1.0 } else { 1.0 };
     let turn = Affine::translate(at).then(&Affine::rotate(rotation));
     let back = Affine::rotate(-rotation).then(&Affine::translate([-at[0], -at[1]]));
-    turn.then(&Affine::scale(flip(2), flip(4))).then(&back)
+    turn.then(&Affine::scale(flip(2), flip(4))).then(&Affine::new([1.0, 0.0, oblique.tan(), 1.0, 0.0, 0.0])).then(&back)
 }
 
 /// Unique edges of polyface `faces` (1-based vertex indices into `verts`, 0 for none; a negative
@@ -1513,7 +1513,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                 let valign = r.i(if r.kind == "TEXT" { 73 } else { 74 }, 0);
                 let (pos, rotation, align) = text_anchor(r.i(72, 0), valign, r.point(10), r.point(11), r.f(50, 0.0).to_radians());
                 let string = parse::text_rich(value.unwrap_or(""));
-                let m = m.then(&Affine::ocs(r)).then(&text_mirror(r.i(71, 0), pos, rotation));
+                let m = m.then(&Affine::ocs(r)).then(&text_shape(r.i(71, 0), r.f(51, 0.0).to_radians(), pos, rotation));
                 w.push_text(pos, rotation, r.f(40, 1.0), r.f(41, 1.0), align, string, &m, pen);
             }
             "MTEXT" => {
@@ -2480,6 +2480,15 @@ mod tests {
         let t = &d.texts[0];
         assert_eq!((t.text.as_str(), t.halign, t.valign), ("Ø10", 1, 2));
         assert!(close(t.up, [0.0, -2.0]));
+    }
+
+    #[test]
+    fn oblique_text_slants_its_up_vector() {
+        // Text rotated 90° (baseline along +Y, up along −X), slanted 45° towards its baseline:
+        // up is (−2, 2) in world, (−2, −2) in output coordinates (Y down).
+        let d = decode(&entities(&[(0, "TEXT"), (10, "0"), (20, "0"), (40, "2"), (1, "x"), (50, "90"), (51, "45")])).unwrap();
+        let t = &d.texts[0];
+        assert!(close(t.x, [0.0, -2.0]) && close(t.up, [-2.0, -2.0]), "{:?} {:?}", t.x, t.up);
     }
 
     /// A DXF with one `kind` entity whose ACIS data is `body`, as SAB in the ACDSDATA section.
