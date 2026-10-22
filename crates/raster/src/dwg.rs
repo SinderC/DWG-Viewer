@@ -5,10 +5,11 @@ use std::f64::consts::TAU;
 use std::io::Cursor;
 
 use acadrust::entities::{AttributeEntity, Body, BoundaryEdge, BoundaryPath, EntityCommon, LeaderPathType, Region, Solid3D};
+use acadrust::tables::{LineType, LineTypeComplexContent};
 use acadrust::types::{Color, Handle, Vector2, Vector3};
 use acadrust::{CadDocument, DwgReader, EntityType};
 
-use crate::dxf::{self, parse, Affine, Ctx, HatchLine, Layer, LeaderLine, LeaderRoot, LeaderText, MultiLeader, Parent, Pen, World, P};
+use crate::dxf::{self, parse, Affine, Ctx, HatchLine, Layer, LeaderLine, LeaderRoot, LeaderText, LinetypeElement, LinetypeShape, MultiLeader, Parent, Pen, World, P};
 
 pub fn decode(data: &[u8]) -> Result<dxf::Drawing, String> {
     let code = data.get(..6).and_then(|v| std::str::from_utf8(v).ok()).filter(|v| v.starts_with("AC"));
@@ -31,9 +32,10 @@ pub fn decode(data: &[u8]) -> Result<dxf::Drawing, String> {
     info.extend(dxf::summary(units, &layers, doc.block_records.names(), doc.model_space_entities().count()));
 
     let mut b = Builder { doc: &doc, world: World::new(layers) };
-    // Complex linetypes (shapes or text in the gaps) are drawn solid.
-    for lt in doc.line_types.iter().filter(|lt| lt.elements.iter().all(|e| e.complex.is_none())) {
-        b.world.add_linetype(&lt.name, lt.elements.iter().map(|e| e.length * doc.header.linetype_scale));
+    for lt in doc.line_types.iter() {
+        if let Some(elements) = linetype_elements(&doc, lt) {
+            b.world.add_linetype(&lt.name, elements.iter().map(|e| e.scaled(doc.header.linetype_scale)).collect());
+        }
     }
     for e in doc.model_space_entities() {
         b.entity(e, &Ctx::ROOT);
@@ -61,6 +63,22 @@ fn recolor(c: &Color, pen: Pen) -> Pen {
 
 fn v2(v: Vector2) -> P {
     [v.x, v.y]
+}
+
+/// The elements of a linetype; None if it has text, or shapes that are not built in (see
+/// `dxf::shapes`), which are drawn solid instead.
+fn linetype_elements(doc: &CadDocument, lt: &LineType) -> Option<Vec<LinetypeElement>> {
+    lt.elements
+        .iter()
+        .map(|e| {
+            let Some(c) = &e.complex else { return Some(LinetypeElement::plain(e.length)) };
+            let LineTypeComplexContent::Shape { shape_number } = c.content else { return None };
+            let file = doc.text_styles.iter().find(|s| s.handle == c.style_handle).map_or("", |s| s.font_file.as_str());
+            let strokes = dxf::shapes::strokes(file, shape_number.into())?;
+            let shape = LinetypeShape { strokes, scale: c.scale, rotation: c.rotation, absolute: c.absolute_rotation, offset: c.offset };
+            Some(LinetypeElement { length: e.length, shape: Some(shape) })
+        })
+        .collect()
 }
 
 /// A hatch boundary path as one ring of points.

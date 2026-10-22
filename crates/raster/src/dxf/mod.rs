@@ -11,6 +11,7 @@
 pub(crate) mod acis;
 mod color;
 pub(crate) mod parse;
+pub(crate) mod shapes;
 
 use std::collections::{BTreeMap, HashMap};
 use std::f64::consts::TAU;
@@ -160,6 +161,7 @@ pub fn decode(data: &[u8]) -> Result<Drawing, String> {
     let mut header: &[Pair] = &[];
     let mut layers = Vec::new();
     let mut linetypes = Vec::new();
+    let mut styles = Vec::new();
     let mut dimstyles = Vec::new();
     let mut blocks = HashMap::new();
     let mut entities = Vec::new();
@@ -181,6 +183,7 @@ pub fn decode(data: &[u8]) -> Result<Drawing, String> {
             Some("TABLES") => {
                 layers.extend(body.iter().filter(|r| r.kind == "LAYER").map(layer));
                 linetypes.extend(body.iter().filter(|r| r.kind == "LTYPE").copied());
+                styles.extend(body.iter().filter(|r| r.kind == "STYLE").copied());
                 dimstyles.extend(body.iter().filter(|r| r.kind == "DIMSTYLE").copied());
             }
             Some("BLOCKS") => blocks = parse_blocks(body),
@@ -206,10 +209,12 @@ pub fn decode(data: &[u8]) -> Result<Drawing, String> {
     let arrow_sizes = dimstyles.iter().map(|r| (r.name(2), arrow_size(r.f(41, dimasz), r.f(40, dimscale)))).collect();
     let mut b = Builder { blocks: &blocks, world: World::new(layers), arrow_sizes, arrow_size: arrow_size(dimasz, dimscale), acis };
     let ltscale = header_var(header, "$LTSCALE").and_then(|v| v.parse().ok()).unwrap_or(1.0);
-    // Complex linetypes (element type 74 non-zero: shapes or text in the gaps) are drawn solid.
-    for lt in linetypes.iter().filter(|r| r.pairs.iter().all(|p| p.code != 74 || p.value.trim() == "0")) {
-        let pattern = lt.pairs.iter().filter(|p| p.code == 49).map(|p| p.value.trim().parse().unwrap_or(0.0) * ltscale);
-        b.world.add_linetype(&lt.name(2), pattern);
+    // Shape files of the text styles, by upper-case handle.
+    let shape_files: HashMap<String, &str> = styles.iter().map(|r| (r.name(5), r.get(3).unwrap_or(""))).collect();
+    for lt in &linetypes {
+        if let Some(elements) = linetype_elements(lt, &shape_files) {
+            b.world.add_linetype(&lt.name(2), elements.iter().map(|e| e.scaled(ltscale)).collect());
+        }
     }
     for e in &entities {
         b.entity(e, &Ctx::ROOT);
@@ -268,13 +273,17 @@ pub(crate) struct World<'a> {
     layers: Vec<Layer>,
     /// Upper-case layer name → index in `layers`.
     layer_ids: HashMap<String, u32>,
-    /// Canvas dash patterns of the linetypes, at linetype scale 1; the first is solid.
+    /// Canvas dash patterns of the linetypes, at linetype scale 1; the first is solid. Complex
+    /// linetypes have an empty (solid) pattern and their elements in `complex`.
     linetypes: Vec<Vec<f64>>,
+    complex: HashMap<u32, Vec<LinetypeElement>>,
     /// Upper-case linetype name → index in `linetypes`.
     linetype_ids: HashMap<String, u32>,
     /// Scaled patterns handed out as `Pen::dash`, and their (linetype, scale bits) → index.
     dashes: Vec<Vec<f64>>,
     dash_ids: HashMap<(u32, u64), u32>,
+    /// Scaled elements of the complex linetypes, by `Pen::dash`.
+    complex_dashes: HashMap<u32, Vec<LinetypeElement>>,
 }
 
 impl<'a> World<'a> {
@@ -284,17 +293,25 @@ impl<'a> World<'a> {
         layers.dedup_by(|a, b| a.name.to_uppercase() == b.name.to_uppercase());
         let layer_ids = layers.iter().enumerate().map(|(i, l)| (l.name.to_uppercase(), i as u32)).collect();
         let (paths, arcs, texts, fills, images, rays, skipped, linetype_ids, dash_ids) = Default::default();
-        let (linetypes, dashes) = (vec![Vec::new()], vec![Vec::new()]);
-        World { paths, arcs, texts, fills, images, rays, page: None, skipped, layers, layer_ids, linetypes, linetype_ids, dashes, dash_ids }
+        let (linetypes, dashes, complex, complex_dashes) = (vec![Vec::new()], vec![Vec::new()], HashMap::new(), HashMap::new());
+        World { paths, arcs, texts, fills, images, rays, page: None, skipped, layers, layer_ids, linetypes, complex, linetype_ids, dashes, dash_ids, complex_dashes }
     }
 
-    /// Adds linetype `name` with its AutoCAD pattern: dashes positive, gaps negative, dots 0.
-    pub(crate) fn add_linetype(&mut self, name: &str, pattern: impl IntoIterator<Item = f64>) {
-        let dash = canvas_dash(pattern);
-        if !dash.is_empty() {
-            self.linetype_ids.insert(name.trim().to_uppercase(), self.linetypes.len() as u32);
+    /// Adds linetype `name` with its AutoCAD pattern: dashes positive, gaps negative, dots 0,
+    /// any of them followed by a shape.
+    pub(crate) fn add_linetype(&mut self, name: &str, elements: Vec<LinetypeElement>) {
+        let id = self.linetypes.len() as u32;
+        if elements.iter().any(|e| e.shape.is_some()) {
+            self.complex.insert(id, elements);
+            self.linetypes.push(Vec::new());
+        } else {
+            let dash = canvas_dash(elements.iter().map(|e| e.length));
+            if dash.is_empty() {
+                return;
+            }
             self.linetypes.push(dash);
         }
+        self.linetype_ids.insert(name.trim().to_uppercase(), id);
     }
 
     /// Index of linetype `name`, or 0 (solid) if it is continuous or not known.
@@ -311,6 +328,9 @@ impl<'a> World<'a> {
         let id = *self.dash_ids.entry((linetype, scale.to_bits())).or_insert(next);
         if id == next {
             self.dashes.push(self.linetypes[linetype as usize].iter().map(|v| v * scale).collect());
+            if let Some(elements) = self.complex.get(&linetype) {
+                self.complex_dashes.insert(id, elements.iter().map(|e| e.scaled(scale)).collect());
+            }
         }
         id
     }
@@ -341,8 +361,16 @@ impl<'a> World<'a> {
     }
 
     pub(crate) fn path(&mut self, points: Vec<P>, m: &Affine, pen: Pen) {
-        if points.len() >= 2 {
-            self.paths.push(Path { points: points.into_iter().map(|p| m.apply(p)).collect(), color: pen.color, width: pen.width, dash: pen.dash, layer: pen.layer });
+        if points.len() < 2 {
+            return;
+        }
+        let points: Vec<P> = points.into_iter().map(|p| m.apply(p)).collect();
+        if let Some(elements) = self.complex_dashes.get(&pen.dash) {
+            for points in complex_strokes(&points, elements) {
+                self.paths.push(Path { points, color: pen.color, width: pen.width, dash: 0, layer: pen.layer });
+            }
+        } else {
+            self.paths.push(Path { points, color: pen.color, width: pen.width, dash: pen.dash, layer: pen.layer });
         }
     }
 
@@ -458,6 +486,12 @@ impl<'a> World<'a> {
     }
 
     pub(crate) fn arc(&mut self, a: Arc, m: &Affine) {
+        if self.complex_dashes.contains_key(&a.dash) {
+            // Complex linetypes are laid out along the arc as a polyline.
+            let steps = ((a.t1 - a.t0).abs() / (TAU / 64.0)).ceil().max(2.0) as usize;
+            let points = (0..=steps).map(|i| a.at(a.t0 + (a.t1 - a.t0) * i as f64 / steps as f64)).collect();
+            return self.path(points, m, Pen { color: a.color, width: a.width, dash: a.dash, layer: a.layer });
+        }
         self.arcs.push(Arc { centre: m.apply(a.centre), u: m.linear(a.u), v: m.linear(a.v), ..a });
     }
 
@@ -775,6 +809,97 @@ pub(crate) struct LeaderText {
     pub angle: f64,
     pub height: f64,
     pub column: u8,
+}
+
+/// One element of a linetype: a dash (positive length), gap (negative) or dot (0), with the shape
+/// drawn at its end, if any.
+#[derive(Clone)]
+pub(crate) struct LinetypeElement {
+    pub length: f64,
+    pub shape: Option<LinetypeShape>,
+}
+
+/// A shape of a complex linetype.
+#[derive(Clone)]
+pub(crate) struct LinetypeShape {
+    /// Strokes in shape units (see `shapes::strokes`).
+    pub strokes: Vec<Vec<P>>,
+    pub scale: f64,
+    /// Radians, from the line's direction, or from the X axis if `absolute`.
+    pub rotation: f64,
+    pub absolute: bool,
+    /// Along the line and to its left, in drawing units.
+    pub offset: P,
+}
+
+impl LinetypeElement {
+    /// A plain dash, gap or dot.
+    pub(crate) fn plain(length: f64) -> Self {
+        LinetypeElement { length, shape: None }
+    }
+
+    /// The element with its lengths, offset and shape size multiplied by `k`.
+    pub(crate) fn scaled(&self, k: f64) -> Self {
+        let shape = self.shape.as_ref().map(|s| LinetypeShape { strokes: s.strokes.clone(), scale: s.scale * k, offset: [s.offset[0] * k, s.offset[1] * k], ..*s });
+        LinetypeElement { length: self.length * k, shape }
+    }
+}
+
+/// Most repeats of a complex linetype drawn along one path; finer ones become a solid line.
+const MAX_LINETYPE_REPEATS: f64 = 5_000.0;
+
+/// The strokes of complex linetype `elements` along `points`: its dashes and dots, and its shapes
+/// placed at the ends of their elements. The pattern starts at the first point and repeats.
+fn complex_strokes(points: &[P], elements: &[LinetypeElement]) -> Vec<Vec<P>> {
+    let ends: Vec<f64> = points
+        .windows(2)
+        .scan(0.0, |len, w| {
+            *len += (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]);
+            Some(*len)
+        })
+        .collect();
+    let total = ends.last().copied().unwrap_or(0.0);
+    let period: f64 = elements.iter().map(|e| e.length.abs()).sum();
+    if !(period > 0.0) || total / period > MAX_LINETYPE_REPEATS {
+        return vec![points.to_vec()];
+    }
+    // Segment containing distance `t` along the path, and the point there.
+    let segment = |t: f64| ends.partition_point(|&e| e < t).min(ends.len() - 1);
+    let at = |t: f64| {
+        let i = segment(t);
+        let (a, b) = (points[i], points[i + 1]);
+        let start = if i == 0 { 0.0 } else { ends[i - 1] };
+        let f = if ends[i] > start { (t - start) / (ends[i] - start) } else { 0.0 };
+        [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f]
+    };
+    let mut out = Vec::new();
+    let mut pos = 0.0;
+    while pos < total {
+        for e in elements {
+            let end = pos + e.length.abs();
+            if e.length >= 0.0 && pos <= total {
+                // The dash's points: its ends and the path's vertices between them.
+                let (i, j) = (segment(pos), segment(end.min(total)));
+                let mut dash = vec![at(pos)];
+                dash.extend((i..j).map(|k| points[k + 1]));
+                dash.push(at(end.min(total)));
+                out.push(dash);
+            }
+            if let Some(shape) = e.shape.as_ref().filter(|_| end <= total) {
+                let i = segment(end);
+                let (a, b) = (points[i], points[i + 1]);
+                let line = (b[1] - a[1]).atan2(b[0] - a[0]);
+                let (ls, lc) = line.sin_cos();
+                let o = at(end);
+                let origin = [o[0] + shape.offset[0] * lc - shape.offset[1] * ls, o[1] + shape.offset[0] * ls + shape.offset[1] * lc];
+                let (rs, rc) = (shape.rotation + if shape.absolute { 0.0 } else { line }).sin_cos();
+                let place = |p: &P| [origin[0] + shape.scale * (p[0] * rc - p[1] * rs), origin[1] + shape.scale * (p[0] * rs + p[1] * rc)];
+                out.extend(shape.strokes.iter().map(|s| s.iter().map(place).collect()));
+            }
+            pos = end;
+        }
+    }
+    out
 }
 
 /// Most pattern lines drawn for one hatch; denser hatches are filled instead.
@@ -1258,6 +1383,48 @@ impl<'a, 'b> Builder<'a, 'b> {
             self.entity(e, &inner);
         }
     }
+}
+
+/// The elements of an LTYPE, in file order; None if it has text, or shapes that are not built in
+/// (see `shapes`), which are drawn solid instead.
+fn linetype_elements(r: &Record, shape_files: &HashMap<String, &str>) -> Option<Vec<LinetypeElement>> {
+    // Each element with its shape's number and file, looked up once all groups are read.
+    let mut out: Vec<(LinetypeElement, i64, &str)> = Vec::new();
+    for p in r.pairs {
+        let v = || p.value.trim().parse::<f64>().unwrap_or(0.0);
+        if p.code == 49 {
+            out.push((LinetypeElement::plain(v()), 0, ""));
+            continue;
+        }
+        let Some((e, number, file)) = out.last_mut() else { continue };
+        match (p.code, &mut e.shape) {
+            // Element flags: 1 absolute rotation, 2 text, 4 shape.
+            (74, _) => {
+                let flags = v() as i64;
+                if flags & 2 != 0 {
+                    return None;
+                }
+                if flags & 4 != 0 {
+                    e.shape = Some(LinetypeShape { strokes: Vec::new(), scale: 1.0, rotation: 0.0, absolute: flags & 1 != 0, offset: [0.0; 2] });
+                }
+            }
+            (75, _) => *number = v() as i64,
+            (340, _) => *file = shape_files.get(&p.value.trim().to_uppercase()).copied().unwrap_or(""),
+            (46, Some(s)) => s.scale = v(),
+            (50, Some(s)) => s.rotation = v().to_radians(),
+            (44, Some(s)) => s.offset[0] = v(),
+            (45, Some(s)) => s.offset[1] = v(),
+            _ => {}
+        }
+    }
+    out.into_iter()
+        .map(|(mut e, number, file)| {
+            if let Some(s) = &mut e.shape {
+                s.strokes = shapes::strokes(file, number)?;
+            }
+            Some(e)
+        })
+        .collect()
 }
 
 /// SAB data of the ACDSDATA section's ASM_Data records, by upper-case owner entity handle.
@@ -1784,6 +1951,37 @@ mod tests {
         assert!(dash(1).is_empty() && dash(2).is_empty());
         // BYBLOCK takes the INSERT's DASHED, scaled by $LTSCALE and the insert scale 3, not its own 0.5.
         assert_eq!(dash(3), [18.0, 6.0]);
+    }
+
+    #[test]
+    fn complex_linetype_places_shapes_at_element_ends() {
+        let zig = LinetypeShape { strokes: shapes::strokes("ltypeshp.shx", 131).unwrap(), scale: 0.5, rotation: 0.0, absolute: false, offset: [0.0, 0.0] };
+        let elements = [LinetypeElement::plain(0.0), LinetypeElement { length: -2.0, shape: Some(zig) }];
+        // Up the Y axis: dots at 0 and 2, a zig ending at 2 (whose end is the path's end), none past it.
+        let strokes = complex_strokes(&[[0.0, 0.0], [0.0, 3.0]], &elements);
+        assert_eq!(strokes.len(), 3);
+        assert_eq!(strokes[0], [[0.0, 0.0]; 2]);
+        let p = &strokes[1];
+        assert!(close(p[0], [0.0, 2.0]) && close(p[1], [-0.5, 2.5]) && close(p[2], [0.0, 3.0]), "{p:?}");
+        assert_eq!(strokes[2], [[0.0, 2.0]; 2]);
+    }
+
+    #[test]
+    fn complex_linetype_from_ltype_table() {
+        let line = |lt: &'static str| [(0, "LINE"), (8, "0"), (6, lt), (10, "0"), (20, "0"), (11, "10"), (21, "0")];
+        let g: Vec<(i32, &str)> = [
+            &[(0, "SECTION"), (2, "TABLES"), (0, "STYLE"), (5, "1A"), (2, ""), (70, "1"), (3, "ltypeshp.shx"),
+            (0, "LTYPE"), (2, "ZIG"), (73, "2"), (40, "4"), (49, "0"), (74, "0"), (49, "-4"), (74, "4"), (75, "131"), (340, "1A"), (46, "1"), (50, "0"), (44, "0"), (45, "0"),
+            (0, "LTYPE"), (2, "OTHER"), (73, "2"), (40, "4"), (49, "0"), (74, "0"), (49, "-4"), (74, "4"), (75, "1"), (340, "1A"), (46, "1"), (50, "0"), (44, "0"), (45, "0"),
+            (0, "ENDSEC"), (0, "SECTION"), (2, "ENTITIES")][..],
+            &line("ZIG"), &line("OTHER"), &[(0, "ENDSEC"), (0, "EOF")],
+        ]
+        .concat();
+        let d = decode(&dxf(&g)).unwrap();
+        // ZIG: dots at 0, 4 and 8 and zigs ending at 4 and 8. OTHER's shape 1 is not built in: solid.
+        assert_eq!(d.paths.len(), 6);
+        assert_eq!(d.paths.iter().filter(|p| p.points.len() == 3).count(), 2);
+        assert!(d.paths.iter().all(|p| p.dash == 0));
     }
 
     #[test]
