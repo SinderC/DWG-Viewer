@@ -11,6 +11,7 @@ use std::io::Read;
 
 use super::image::{self, Kind};
 use super::palette;
+use super::zip::MAX_ENTRY;
 use crate::dxf::{Affine, Pen, World, P, BACKGROUND, FOREGROUND};
 use crate::hpgl::{pen_color, CAP_PER_EM};
 
@@ -24,6 +25,10 @@ const REVISION_OLD_TEXT: u32 = 32;
 const REVISION_RGBA: u32 = 33;
 const REVISION_NEW_COLORMAP: u32 = 38;
 const REVISION_PACKAGE: u32 = 600;
+/// Most bytes all compressed sections together may hand on, each with the rest of the stream after it.
+const MAX_INFLATED: u64 = 1 << 30;
+/// Deepest nesting of `(` groups, within the wasm stack.
+const MAX_GROUP_DEPTH: usize = 64;
 
 type R<T> = Result<T, String>;
 type Point = [i32; 2];
@@ -235,7 +240,10 @@ impl<'b> Cur<'b> {
     }
 
     /// Operands of an extended ASCII opcode up to its closing `)`.
-    fn group(&mut self) -> R<Vec<Tok>> {
+    fn group(&mut self, depth: usize) -> R<Vec<Tok>> {
+        if depth > MAX_GROUP_DEPTH {
+            return Err("groups nested too deeply".into());
+        }
         let mut toks = Vec::new();
         loop {
             self.eat_space();
@@ -248,7 +256,7 @@ impl<'b> Cur<'b> {
                     self.p += 1;
                     // Sub-options are named ("(Height 10)"); matrix rows are not ("(1 0 0)").
                     let name = if self.peek().is_some_and(|b| b.is_ascii_alphabetic()) { self.name() } else { "" };
-                    toks.push(Tok::Group(name.to_string(), self.group()?));
+                    toks.push(Tok::Group(name.to_string(), self.group(depth + 1)?));
                 }
                 b'{' | b'\'' | b'"' => toks.push(Tok::Str(self.string()?)),
                 _ => {
@@ -260,7 +268,8 @@ impl<'b> Cur<'b> {
                             self.p += 1;
                         }
                         word += &latin1(&self.d[start..self.p]);
-                        if !word.ends_with(',') {
+                        // A trailing comma before `(`, `)` or the end has nothing more to join.
+                        if !word.ends_with(',') || self.p == start {
                             break;
                         }
                         self.eat_space();
@@ -374,6 +383,8 @@ struct State<'w> {
     /// World layer of the current W2D layer, created on first use.
     layer: Option<u32>,
     layers: HashMap<i32, u32>,
+    /// Bytes handed on by `inflate` so far.
+    inflated: u64,
 }
 
 impl<'w> State<'w> {
@@ -395,6 +406,7 @@ impl<'w> State<'w> {
             font: Font { height: 0, rotation: 0, width_scale: UNIT_WIDTH as u16 },
             layer: None,
             layers: HashMap::new(),
+            inflated: 0,
         }
     }
 
@@ -584,10 +596,14 @@ impl<'w> State<'w> {
         let rest = &c.d[c.p..];
         let mut z = flate2::bufread::ZlibDecoder::new(rest);
         let mut out = Vec::new();
-        z.read_to_end(&mut out).map_err(|e| format!("corrupt compressed data: {e}"))?;
+        (&mut z).take(MAX_ENTRY + 1).read_to_end(&mut out).map_err(|e| format!("corrupt compressed data: {e}"))?;
         let mut after = &rest[z.total_in() as usize..];
         if after.first() == Some(&b'}') {
             after = &after[1..];
+        }
+        self.inflated += (out.len() + after.len()) as u64;
+        if out.len() as u64 > MAX_ENTRY || self.inflated > MAX_INFLATED {
+            return Err("compressed data too large".into());
         }
         out.extend_from_slice(after);
         Ok(out)
@@ -607,7 +623,7 @@ impl<'w> State<'w> {
             c.skip_group()?;
             return Ok(Flow::Next);
         }
-        let t = c.group()?;
+        let t = c.group(0)?;
         let bad = || format!("malformed ({name} …)");
         match name {
             "Circle" | "Ellipse" => {

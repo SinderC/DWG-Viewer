@@ -169,7 +169,11 @@ fn number(value: f64, dec: i64, zin: i64, sep: char) -> String {
         s = s.trim_end_matches('0').trim_end_matches('.').to_string();
     }
     if zin & 4 != 0 {
-        s = s.replacen("0.", ".", 1);
+        if let Some(r) = s.strip_prefix("0.") {
+            s = format!(".{r}");
+        } else if let Some(r) = s.strip_prefix("-0.") {
+            s = format!("-.{r}");
+        }
     }
     if s == "-0" { "0".into() } else { s.replace('.', &sep.to_string()) }
 }
@@ -459,6 +463,9 @@ mod tests {
         assert_eq!(number(12.5, 2, 8, ','), "12,5");
         assert_eq!(number(12.0, 2, 8, '.'), "12");
         assert_eq!(number(0.5, 2, 12, '.'), ".5");
+        assert_eq!(number(-0.5, 2, 4, '.'), "-.50");
+        assert_eq!(number(10.5, 2, 4, '.'), "10.50");
+        assert_eq!(number(100.25, 2, 12, '.'), "100.25");
     }
 
     #[test]

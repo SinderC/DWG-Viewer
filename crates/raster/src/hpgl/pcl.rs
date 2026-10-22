@@ -217,6 +217,8 @@ struct Raster {
     rows: Vec<Vec<u8>>,
     /// Last row, the base for delta-row compression.
     seed: Vec<u8>,
+    /// Bytes held in `rows`; compressed rows expand, so the row count alone does not bound memory.
+    bytes: u64,
 }
 
 impl Rtl {
@@ -250,7 +252,10 @@ impl Rtl {
                     return;
                 }
                 match row(self.compression, e.data, &mut r.seed) {
-                    Ok(()) if r.rows.len() < MAX_ROWS => r.rows.push(r.seed.clone()),
+                    Ok(()) if r.rows.len() < MAX_ROWS && r.bytes + r.seed.len() as u64 <= MAX_PIXELS => {
+                        r.bytes += r.seed.len() as u64;
+                        r.rows.push(r.seed.clone());
+                    }
                     Ok(()) => r.format = Err("RTL image too large"),
                     Err(why) => r.format = Err(why),
                 }
@@ -282,7 +287,7 @@ impl Rtl {
     }
 
     fn start(&mut self, x: f64) {
-        self.raster = Some(Raster { x, y: self.cursor[1], format: self.format.clone(), rows: Vec::new(), seed: Vec::new() });
+        self.raster = Some(Raster { x, y: self.cursor[1], format: self.format.clone(), rows: Vec::new(), seed: Vec::new(), bytes: 0 });
     }
 
     /// Ends the raster image being received, if any, and moves the cursor below it.

@@ -473,15 +473,16 @@ impl<'a> World<'a> {
                 }
                 let k = |p: P| (dot(p, n) - dot(l.base, n)) / step;
                 let (lo, hi) = edges.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &(a, _)| (lo.min(k(a)), hi.max(k(a))));
-                (lo <= hi).then(|| (l, d, n, lo.ceil() as i64, hi.floor() as i64))
+                (lo <= hi).then(|| (l, d, n, lo.ceil(), hi.floor()))
             })
             .collect();
-        let lines: i64 = families.iter().map(|f| (f.4 - f.3 + 1).max(0)).sum();
-        if pattern.is_none() || lines > MAX_HATCH_LINES {
+        // Counted in f64: a tiny spacing puts k beyond i64.
+        let lines: f64 = families.iter().map(|f| (f.4 - f.3 + 1.0).max(0.0)).sum();
+        if pattern.is_none() || !(lines <= MAX_HATCH_LINES) {
             return self.fill(rings, true, m, pen);
         }
         for (l, d, n, k0, k1) in families {
-            for k in k0..=k1 {
+            for k in k0 as i64..=k1 as i64 {
                 let o = [l.base[0] + l.offset[0] * k as f64, l.base[1] + l.offset[1] * k as f64];
                 let rel = |p: P| [p[0] - o[0], p[1] - o[1]];
                 // Where the line crosses the boundary, as distances along it from `o`.
@@ -997,7 +998,7 @@ fn complex_strokes(points: &[P], elements: &[LinetypeElement]) -> Vec<Vec<P>> {
 }
 
 /// Most pattern lines drawn for one hatch; denser hatches are filled instead.
-const MAX_HATCH_LINES: i64 = 20_000;
+const MAX_HATCH_LINES: f64 = 20_000.0;
 /// Most dashes drawn along one hatch line inside its boundary; finer ones become a solid line.
 const MAX_HATCH_DASHES: f64 = 2_000.0;
 
@@ -1015,6 +1016,7 @@ fn dash_spans(t0: f64, t1: f64, pattern: &[f64]) -> Vec<(f64, f64)> {
     let mut out = Vec::new();
     let mut pos = (t0 / period).floor() * period;
     while pos <= t1 {
+        let start = pos;
         for &v in pattern {
             let end = pos + v.abs();
             let (a, b) = (pos.max(t0), end.min(t1));
@@ -1022,6 +1024,10 @@ fn dash_spans(t0: f64, t1: f64, pattern: &[f64]) -> Vec<(f64, f64)> {
                 out.push((a, b));
             }
             pos = end;
+        }
+        // Far from the origin a period can be too small to move `pos`.
+        if pos <= start {
+            break;
         }
     }
     out
@@ -1348,7 +1354,8 @@ pub(crate) fn polyface_edges(verts: &[P], faces: &[[i64; 4]]) -> Vec<(usize, Vec
         let idx: Vec<i64> = face.iter().copied().filter(|&i| i != 0).collect();
         for k in 0..idx.len() {
             let (a, b) = (idx[k], idx[(k + 1) % idx.len()]);
-            let (Some(&p), Some(&q)) = (verts.get(a.unsigned_abs() as usize - 1), verts.get(b.unsigned_abs() as usize - 1)) else { continue };
+            let vert = |i: i64| usize::try_from(i.unsigned_abs()).ok().and_then(|i| i.checked_sub(1)).and_then(|i| verts.get(i).copied());
+            let (Some(p), Some(q)) = (vert(a), vert(b)) else { continue };
             if a > 0 && seen.insert((a.abs().min(b.abs()), a.abs().max(b.abs()))) {
                 out.push((f, vec![p, q]));
             }
@@ -1561,7 +1568,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                 // Background mask (90): flag 1 in its own colour (63, 421), 2 in the paper's; 45 sizes it in text heights.
                 let flags = r.i(90, 0);
                 if flags & 3 != 0 {
-                    let color = if flags & 2 != 0 { BACKGROUND } else { true_color(r).unwrap_or_else(|| color::aci(r.i(63, 7))) };
+                    let color = if flags & 2 != 0 { BACKGROUND } else { r.get(421).and_then(|v| v.trim().parse::<i64>().ok()).map_or_else(|| color::aci(r.i(63, 7)), |v| v as u32 & 0xFF_FFFF) };
                     w.mask_texts(start, color, (r.f(45, 1.5) - 1.0) * r.f(40, 1.0), &m);
                 }
             }
@@ -1792,7 +1799,7 @@ fn subd_mesh(r: &Record) -> (Vec<P>, Vec<[i64; 4]>) {
     let mut rest = &list[..];
     while let [count, tail @ ..] = rest {
         let count = (*count).max(0) as usize;
-        let face: Vec<i64> = tail.iter().take(count).map(|i| i + 1).collect();
+        let face: Vec<i64> = tail.iter().take(count).map(|i| i.saturating_add(1)).collect();
         for k in 1..face.len().saturating_sub(1) {
             // Fan triangles; their inner edges are hidden (negative start index).
             let (a, b, c) = (face[0], face[k], face[k + 1]);

@@ -5,8 +5,10 @@ use std::io::Read;
 const EOCD: u32 = 0x0605_4B50;
 const CENTRAL: u32 = 0x0201_4B50;
 const LOCAL: u32 = 0x0403_4B50;
-/// Largest decompressed entry, against zip bombs.
-const MAX_ENTRY: u64 = 1 << 30;
+/// Largest decompressed entry, against zip bombs (and within wasm32's memory).
+pub(super) const MAX_ENTRY: u64 = 1 << 28;
+/// Deflate's best ratio, so a header's size can only reserve what the compressed data can produce.
+const MAX_RATIO: usize = 1032;
 
 struct Entry {
     name: String,
@@ -118,8 +120,11 @@ impl<'a> Zip<'a> {
         match e.method {
             0 => Ok(raw.to_vec()),
             8 => {
-                let mut out = Vec::with_capacity(e.size as usize);
-                flate2::read::DeflateDecoder::new(raw).take(MAX_ENTRY).read_to_end(&mut out).map_err(|_| corrupt())?;
+                let mut out = Vec::with_capacity((e.size as usize).min(e.compressed.saturating_mul(MAX_RATIO)));
+                flate2::read::DeflateDecoder::new(raw).take(MAX_ENTRY + 1).read_to_end(&mut out).map_err(|_| corrupt())?;
+                if out.len() as u64 > MAX_ENTRY {
+                    return Err(format!("{} is too large", e.name));
+                }
                 Ok(out)
             }
             m => Err(format!("{}: unsupported ZIP compression method {m}", e.name)),
