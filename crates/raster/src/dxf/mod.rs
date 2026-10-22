@@ -41,6 +41,8 @@ pub struct Path {
     pub dash: u32,
     /// Index into `Drawing::layers`.
     pub layer: u32,
+    /// Line weight in 1/100 mm, drawn in screen pixels when line weights are shown; 0 for none.
+    pub weight: u8,
 }
 
 /// The points `centre + u·cos t + v·sin t` for `t` from `t0` to `t1` (which may be less than `t0`).
@@ -57,6 +59,8 @@ pub struct Arc {
     pub dash: u32,
     /// Index into `Drawing::layers`.
     pub layer: u32,
+    /// As for [`Path::weight`].
+    pub weight: u8,
 }
 
 /// A line of text (lines separated by `\n`). Glyph space is spanned by `x` (the baseline direction,
@@ -158,14 +162,15 @@ pub struct Background {
     pub color: u32,
 }
 
-/// Colour, layer, line width (in drawing units, 0 = hairline) and dash pattern (index into
-/// `Drawing::dashes`, 0 = solid) of a shape.
+/// Colour, layer, line width (in drawing units, 0 = hairline), dash pattern (index into
+/// `Drawing::dashes`, 0 = solid) and line weight (see [`Path::weight`]) of a shape.
 #[derive(Clone, Copy)]
 pub(crate) struct Pen {
     pub color: u32,
     pub layer: u32,
     pub width: f64,
     pub dash: u32,
+    pub weight: u8,
 }
 
 /// Parses an ASCII DXF file and expands its model space.
@@ -224,6 +229,7 @@ pub fn decode(data: &[u8]) -> Result<Drawing, String> {
     let dim_style = DimStyle::from_codes(header_dim, header_var(header, "$DIMPOST"), &DimStyle::default());
     let dim_styles = dimstyles.iter().map(|r| (r.name(2), DimStyle::from_codes(|code| r.get(code).and_then(|v| v.trim().parse().ok()), r.get(3), &dim_style))).collect();
     let mut b = Builder { blocks: &blocks, world: World::new(layers), dim_styles, dim_style, acis };
+    b.world.default_weight = header_var(header, "$LWDEFAULT").and_then(|v| v.trim().parse().ok()).filter(|w: &u8| *w <= 211).unwrap_or(25);
     let ltscale = header_var(header, "$LTSCALE").and_then(|v| v.parse().ok()).unwrap_or(1.0);
     // Shape files of the text styles, by upper-case handle.
     let shape_files: HashMap<String, &str> = styles.iter().map(|r| (r.name(5), r.get(3).unwrap_or(""))).collect();
@@ -300,6 +306,8 @@ pub(crate) struct World<'a> {
     dash_ids: HashMap<(u32, u64), u32>,
     /// Scaled elements of the complex linetypes, by `Pen::dash`.
     complex_dashes: HashMap<u32, Vec<LinetypeElement>>,
+    /// Line weight for DEFAULT ($LWDEFAULT), in 1/100 mm.
+    pub(crate) default_weight: u8,
 }
 
 impl<'a> World<'a> {
@@ -310,7 +318,7 @@ impl<'a> World<'a> {
         let layer_ids = layers.iter().enumerate().map(|(i, l)| (l.name.to_uppercase(), i as u32)).collect();
         let (paths, arcs, texts, fills, images, rays, skipped, linetype_ids, dash_ids) = Default::default();
         let (linetypes, dashes, complex, complex_dashes) = (vec![Vec::new()], vec![Vec::new()], HashMap::new(), HashMap::new());
-        World { paths, arcs, texts, fills, images, rays, page: None, skipped, layers, layer_ids, linetypes, complex, linetype_ids, dashes, dash_ids, complex_dashes }
+        World { paths, arcs, texts, fills, images, rays, page: None, skipped, layers, layer_ids, linetypes, complex, linetype_ids, dashes, dash_ids, complex_dashes, default_weight: 25 }
     }
 
     /// Adds linetype `name` with its AutoCAD pattern: dashes positive, gaps negative, dots 0,
@@ -362,7 +370,7 @@ impl<'a> World<'a> {
             return id;
         }
         let id = self.layers.len() as u32;
-        self.layers.push(Layer { name: name.to_string(), color, visible: true, linetype: String::new() });
+        self.layers.push(Layer { name: name.to_string(), color, visible: true, linetype: String::new(), weight: -3 });
         self.layer_ids.insert(key, id);
         id
     }
@@ -383,10 +391,10 @@ impl<'a> World<'a> {
         let points: Vec<P> = points.into_iter().map(|p| m.apply(p)).collect();
         if let Some(elements) = self.complex_dashes.get(&pen.dash) {
             for points in complex_strokes(&points, elements) {
-                self.paths.push(Path { points, color: pen.color, width: pen.width, dash: 0, layer: pen.layer });
+                self.paths.push(Path { points, color: pen.color, width: pen.width, dash: 0, layer: pen.layer, weight: pen.weight });
             }
         } else {
-            self.paths.push(Path { points, color: pen.color, width: pen.width, dash: pen.dash, layer: pen.layer });
+            self.paths.push(Path { points, color: pen.color, width: pen.width, dash: pen.dash, layer: pen.layer, weight: pen.weight });
         }
     }
 
@@ -405,7 +413,7 @@ impl<'a> World<'a> {
 
     /// A WIPEOUT: `ring` filled with the paper colour over the lines drawn so far.
     pub(crate) fn wipeout(&mut self, ring: Vec<P>, m: &Affine, layer: u32) {
-        let pen = Pen { color: BACKGROUND, layer, width: 0.0, dash: 0 };
+        let pen = Pen { color: BACKGROUND, layer, width: 0.0, dash: 0, weight: 0 };
         self.fill(vec![ring], false, m, pen);
         if let Some(f) = self.fills.last_mut() {
             f.mask = true;
@@ -554,21 +562,21 @@ impl<'a> World<'a> {
             // Complex linetypes are laid out along the arc as a polyline.
             let steps = ((a.t1 - a.t0).abs() / (TAU / 64.0)).ceil().max(2.0) as usize;
             let points = (0..=steps).map(|i| a.at(a.t0 + (a.t1 - a.t0) * i as f64 / steps as f64)).collect();
-            return self.path(points, m, Pen { color: a.color, width: a.width, dash: a.dash, layer: a.layer });
+            return self.path(points, m, Pen { color: a.color, width: a.width, dash: a.dash, layer: a.layer, weight: a.weight });
         }
         self.arcs.push(Arc { centre: m.apply(a.centre), u: m.linear(a.u), v: m.linear(a.v), ..a });
     }
 
     pub(crate) fn circle_arc(&mut self, centre: P, r: f64, start: f64, sweep: f64, m: &Affine, pen: Pen) {
         if r > 0.0 {
-            self.arc(Arc { centre, u: [r, 0.0], v: [0.0, r], t0: start, t1: start + sweep, color: pen.color, width: pen.width, dash: pen.dash, layer: pen.layer }, m);
+            self.arc(Arc { centre, u: [r, 0.0], v: [0.0, r], t0: start, t1: start + sweep, color: pen.color, width: pen.width, dash: pen.dash, layer: pen.layer, weight: pen.weight }, m);
         }
     }
 
     /// `ratio` is minor / major axis, negated for a flipped extrusion: the minor axis is the
     /// extrusion direction × the major axis.
     pub(crate) fn ellipse(&mut self, centre: P, u: P, ratio: f64, t0: f64, t1: f64, m: &Affine, pen: Pen) {
-        self.arc(Arc { centre, u, v: [-u[1] * ratio, u[0] * ratio], t0, t1: t0 + sweep(t0, t1), color: pen.color, width: pen.width, dash: pen.dash, layer: pen.layer }, m);
+        self.arc(Arc { centre, u, v: [-u[1] * ratio, u[0] * ratio], t0, t1: t0 + sweep(t0, t1), color: pen.color, width: pen.width, dash: pen.dash, layer: pen.layer, weight: pen.weight }, m);
     }
 
     /// Straight runs become paths and bulged segments arcs; segments with a width become filled
@@ -1095,6 +1103,8 @@ pub struct Layer {
     pub visible: bool,
     /// Linetype name, or empty for continuous.
     pub linetype: String,
+    /// Line weight in 1/100 mm, or -3 for the drawing's default.
+    pub weight: i16,
 }
 
 fn layer(r: &Record) -> Layer {
@@ -1103,7 +1113,7 @@ fn layer(r: &Record) -> Layer {
     // A negative colour index means the layer is off.
     let name = r.get(2).unwrap_or("").trim().to_string();
     let linetype = r.get(6).unwrap_or("").trim().to_string();
-    Layer { name, color: true_color(r).unwrap_or_else(|| color::aci(index.abs())), visible: index >= 0 && !frozen, linetype }
+    Layer { name, color: true_color(r).unwrap_or_else(|| color::aci(index.abs())), visible: index >= 0 && !frozen, linetype, weight: r.i(370, -3) as i16 }
 }
 
 fn true_color(r: &Record) -> Option<u32> {
@@ -1214,6 +1224,7 @@ pub(crate) struct Parent<'a> {
     pub layer: &'a str,
     pub color: u32,
     pub linetype: u32,
+    pub weight: u8,
 }
 
 /// Inherited state while expanding blocks.
@@ -1231,7 +1242,9 @@ impl Ctx<'_> {
 /// What an entity passes on as a parent, and its pen. `index` is the ACI colour (0 BYBLOCK, 256 or
 /// negative BYLAYER); `true_color` overrides it. `linetype` is the entity's linetype name (empty
 /// for BYLAYER) and scale.
-pub(crate) fn style<'a>(w: &mut World, own: &'a str, true_color: Option<u32>, index: i64, linetype: (&str, f64), ctx: &Ctx<'a>) -> (Parent<'a>, Pen) {
+/// `weight` is the entity's line weight in 1/100 mm, or -1 BYLAYER, -2 BYBLOCK, -3 the drawing's default.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn style<'a>(w: &mut World, own: &'a str, true_color: Option<u32>, index: i64, linetype: (&str, f64), weight: i64, ctx: &Ctx<'a>) -> (Parent<'a>, Pen) {
     let name = match ctx.parent {
         Some(parent) if own == "0" => parent.layer,
         _ => own,
@@ -1250,7 +1263,16 @@ pub(crate) fn style<'a>(w: &mut World, own: &'a str, true_color: Option<u32>, in
         name => w.linetype_id(name),
     };
     let dash = w.dash(linetype, scale * ctx.m.length_scale());
-    (Parent { layer: name, color, linetype }, Pen { color, layer, width: 0.0, dash })
+    let weight = match weight {
+        -1 => w.layers[layer as usize].weight.into(),
+        own => own,
+    };
+    let weight = match weight {
+        -2 => ctx.parent.map_or(w.default_weight, |p| p.weight),
+        0..=211 => weight as u8,
+        _ => w.default_weight,
+    };
+    (Parent { layer: name, color, linetype, weight }, Pen { color, layer, width: 0.0, dash, weight })
 }
 
 /// Block transforms for an INSERT at `at` (after `m` and the entity's OCS `ocs`): one per cell of
@@ -1391,7 +1413,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             return;
         }
         let own = r.get(8).map_or("0", str::trim);
-        let (parent, pen) = style(&mut self.world, own, true_color(r), r.i(62, 256), (r.get(6).unwrap_or(""), r.f(48, 1.0)), ctx);
+        let (parent, pen) = style(&mut self.world, own, true_color(r), r.i(62, 256), (r.get(6).unwrap_or(""), r.f(48, 1.0)), r.i(370, -1), ctx);
         let (m, w) = (ctx.m, &mut self.world);
         match r.kind {
             "LINE" => w.path(vec![r.point(10), r.point(11)], &m, pen),
@@ -2308,6 +2330,29 @@ mod tests {
         assert_eq!(canvas_dash([24.0, -3.0, 0.0, -3.0]), [24.0, 3.0, 0.0, 3.0]);
         assert_eq!(canvas_dash([-3.0, 12.0, 0.0, -1.0]), [12.0, 4.0]);
         assert!(canvas_dash([5.0, 0.0]).is_empty() && canvas_dash([]).is_empty());
+    }
+
+    #[test]
+    fn line_weight_by_layer_by_block_and_default() {
+        let g = [
+            (0, "SECTION"), (2, "HEADER"), (9, "$LWDEFAULT"), (70, "30"), (0, "ENDSEC"),
+            (0, "SECTION"), (2, "TABLES"),
+            (0, "LAYER"), (2, "Heavy"), (62, "7"), (370, "100"),
+            (0, "ENDSEC"),
+            (0, "SECTION"), (2, "BLOCKS"),
+            (0, "BLOCK"), (2, "b"), (10, "0"), (20, "0"),
+            (0, "LINE"), (8, "0"), (370, "-2"), (10, "0"), (20, "0"), (11, "1"), (21, "0"),
+            (0, "ENDBLK"), (0, "ENDSEC"),
+            (0, "SECTION"), (2, "ENTITIES"),
+            (0, "LINE"), (8, "Heavy"), (10, "0"), (20, "0"), (11, "10"), (21, "0"),
+            (0, "LINE"), (8, "Heavy"), (370, "50"), (10, "0"), (20, "1"), (11, "10"), (21, "1"),
+            (0, "LINE"), (8, "0"), (10, "0"), (20, "2"), (11, "10"), (21, "2"),
+            (0, "INSERT"), (8, "0"), (370, "211"), (2, "b"), (10, "0"), (20, "3"),
+            (0, "ENDSEC"), (0, "EOF"),
+        ];
+        let d = decode(&dxf(&g)).unwrap();
+        // BYLAYER, its own, BYLAYER on a layer without one ($LWDEFAULT), BYBLOCK from the insert.
+        assert_eq!(d.paths.iter().map(|p| p.weight).collect::<Vec<_>>(), [100, 50, 30, 211]);
     }
 
     #[test]

@@ -15,6 +15,10 @@ const LINE_SPACING = 5 / 3;
 const MIN_DASH_PX = 4;
 /** Diameter, in device pixels, below which a dot (a path of zero length, such as a POINT) is not drawn smaller. */
 const MIN_DOT_PX = 3;
+/** Line weights up to this (in 1/100 mm) are drawn as hairlines, as AutoCAD displays them. */
+const HAIRLINE_WEIGHT = 25;
+/** CSS pixels per millimetre of line weight. */
+const PX_PER_MM = 96 / 25.4;
 /** Text smaller than this many device pixels is not drawn. */
 const MIN_TEXT_PX = 1.5;
 /** Colours lighter (on white) or darker (on black) than this luma are adjusted to stay readable. */
@@ -102,6 +106,8 @@ interface Stroke {
   period: number;
   /** True for dots: paths of zero length. */
   dot: boolean;
+  /** Line weight in 1/100 mm; 0 for none. */
+  weight: number;
   path: Path2D;
 }
 
@@ -160,15 +166,15 @@ function dashes(doc: DxfDoc): number[][] {
 function strokes(doc: DxfDoc): Map<number, Map<string, Stroke>> {
   const patterns = dashes(doc);
   const byLayer = new Map<number, Map<string, Stroke>>();
-  const pathFor = (layer: number, color: number, width: number, dash: number, dot = false) => {
+  const pathFor = (layer: number, color: number, width: number, dash: number, weight: number, dot = false) => {
     let byStyle = byLayer.get(layer);
     if (!byStyle) byLayer.set(layer, (byStyle = new Map()));
-    const key = `${color}/${width}/${dash}/${dot}`;
+    const key = `${color}/${width}/${dash}/${weight}/${dot}`;
     let stroke = byStyle.get(key);
     if (!stroke) {
       const pattern = dot ? [] : patterns[dash];
       const period = pattern.reduce((a, b) => a + b, 0);
-      byStyle.set(key, (stroke = { color, width, dash: pattern, period, dot, path: new Path2D() }));
+      byStyle.set(key, (stroke = { color, width, dash: pattern, period, dot, weight, path: new Path2D() }));
     }
     return stroke.path;
   };
@@ -178,11 +184,12 @@ function strokes(doc: DxfDoc): Map<number, Map<string, Stroke>> {
   const widths = doc.pathWidths();
   const pathDashes = doc.pathDashes();
   const layers = doc.pathLayers();
+  const weights = doc.pathWeights();
   let k = 0;
   doc.pathLengths().forEach((n, i) => {
     let dot = true;
     for (let j = 1; j < n && dot; j++) dot = points[k + 2 * j] === points[k] && points[k + 2 * j + 1] === points[k + 1];
-    const path = pathFor(layers[i], colors[i], widths[i], pathDashes[i], dot);
+    const path = pathFor(layers[i], colors[i], widths[i], pathDashes[i], weights[i], dot);
     path.moveTo(points[k], points[k + 1]);
     for (let j = 1; j < n; j++) path.lineTo(points[k + 2 * j], points[k + 2 * j + 1]);
     k += 2 * n;
@@ -193,11 +200,12 @@ function strokes(doc: DxfDoc): Map<number, Map<string, Stroke>> {
   const arcLayers = doc.arcLayers();
   const arcWidths = doc.arcWidths();
   const arcDashes = doc.arcDashes();
+  const arcWeights = doc.arcWeights();
   doc.arcColors().forEach((color, i) => {
     const [cx, cy, ux, uy, vx, vy, t0, t1] = arcs.subarray(8 * i, 8 * i + 8);
     const unit = new Path2D();
     unit.ellipse(0, 0, 1, 1, 0, t0, t1, t1 < t0);
-    pathFor(arcLayers[i], color, arcWidths[i], arcDashes[i]).addPath(unit, new DOMMatrix([ux, uy, vx, vy, cx, cy]));
+    pathFor(arcLayers[i], color, arcWidths[i], arcDashes[i], arcWeights[i]).addPath(unit, new DOMMatrix([ux, uy, vx, vy, cx, cy]));
   });
   return byLayer;
 }
@@ -573,7 +581,8 @@ export function vectorDocument(doc: DxfDoc): VectorDocument {
       pageCount: doc.pageCount,
       info: infoRows(doc.info()),
       layers: layerList,
-      draw(ctx, view, invert) {
+      weighted: [...paths.values()].some((byStyle) => [...byStyle.values()].some((s) => s.weight > HAIRLINE_WEIGHT)),
+      draw(ctx, view, invert, weights) {
         const { scale, x, y } = view;
         const { width, height } = ctx.canvas;
         ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -599,14 +608,17 @@ export function vectorDocument(doc: DxfDoc): VectorDocument {
         };
         paint(false);
 
-        // Lines are at least one device pixel wide at any zoom; hairlines exactly that.
+        // Lines are at least one CSS pixel wide at any zoom, hairlines exactly that; with `weights`
+        // a line weight above HAIRLINE_WEIGHT is that many millimetres of screen, whatever the zoom.
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
+        const dpr = window.devicePixelRatio || 1;
         for (const [layer, byStyle] of paths) {
           if (!layerList[layer].visible) continue;
-          for (const { color, width: lineWidth, dash, period, dot, path } of byStyle.values()) {
+          for (const { color, width: lineWidth, dash, period, dot, weight, path } of byStyle.values()) {
+            const px = weights && weight > HAIRLINE_WEIGHT ? Math.round((weight / 100) * PX_PER_MM) : 1;
             ctx.strokeStyle = css(color, invert);
-            ctx.lineWidth = Math.max(lineWidth, (dot ? MIN_DOT_PX : 1) / scale);
+            ctx.lineWidth = Math.max(lineWidth, (dot ? MIN_DOT_PX : px * dpr) / scale);
             ctx.setLineDash(period * scale < MIN_DASH_PX ? [] : dash);
             ctx.stroke(path);
           }

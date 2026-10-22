@@ -46,8 +46,10 @@ export interface VectorDocument {
   info: [string, string][];
   /** In name order; initially visible unless off or frozen in the file. */
   layers: Layer[];
-  /** Draws the whole canvas. `invert` puts the drawing on black instead of white paper. */
-  draw(ctx: CanvasRenderingContext2D, view: View, invert: boolean): void;
+  /** True if some lines have a line weight that draws thicker than a hairline. */
+  weighted: boolean;
+  /** Draws the whole canvas. `invert` puts the drawing on black instead of white paper; `weights` draws line weights. */
+  draw(ctx: CanvasRenderingContext2D, view: View, invert: boolean, weights: boolean): void;
   /** Texts on visible layers containing `query`, ignoring case, in file order. */
   findText(query: string): TextHit[];
   free(): void;

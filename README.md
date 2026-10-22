@@ -12,7 +12,8 @@ the built page's Content-Security-Policy blocks all network access. Supported fo
   fractions, background masks) and attributes, leaders and multileaders, multilines, tables,
   tolerances, nested blocks and dimensions (drawn from their points when the block is missing),
   polyface/polygon meshes and MESH, 3DSOLID/BODY/REGION as a top-view wireframe, in layer and entity
-  colours and linetypes. Not drawn: line weights, transparency, images, binary DXF.
+  colours, linetypes and line weights (shown with the line-weight toggle). Not drawn: transparency,
+  images, binary DXF.
 - **DWG** R13 to 2018+ (read with the `acadrust` crate): the same model-space entities as DXF.
   R12 and older DWG files are not supported.
 - **HP-GL, HP-GL/2 and HP RTL** plot files (`.plt`, `.hpgl`, …), plain or wrapped in PCL/PJL: lines,
@@ -50,6 +51,8 @@ To use it offline, save the page (File → Save Page As) — it is a single self
 - **Info:** file properties — size, resolution, compression and tags (TIFF), header records (CALS),
   version, units, layers and entities not drawn (DXF/DWG), language, plot size, pens and raster images (HP-GL),
   version, sheet, paper size and metadata (DWF), version, description, fonts, picture and scale (CGM)
+- **Line weights:** draws DXF/DWG line weights above 0.25 mm at their size on screen, as AutoCAD's
+  LWDISPLAY does; off by default
 - **Layers:** show or hide DXF/DWG/DWF/WebCGM layers or HP-GL pens, with a name filter and All on / All off; Alt-click shows
   only that layer. Layers that are off or frozen in the file start hidden.
 

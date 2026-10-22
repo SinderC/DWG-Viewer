@@ -220,6 +220,17 @@ impl DxfDoc {
         self.drawing.arcs.iter().map(|a| a.dash).collect()
     }
 
+    /// Line weight of each path in 1/100 mm; 0 = none.
+    #[wasm_bindgen(js_name = pathWeights)]
+    pub fn path_weights(&self) -> Vec<u8> {
+        self.drawing.paths.iter().map(|p| p.weight).collect()
+    }
+
+    #[wasm_bindgen(js_name = arcWeights)]
+    pub fn arc_weights(&self) -> Vec<u8> {
+        self.drawing.arcs.iter().map(|a| a.weight).collect()
+    }
+
     /// All dash patterns' on and off lengths, in drawing units, one pattern after another.
     #[wasm_bindgen(js_name = dashLengths)]
     pub fn dash_lengths(&self) -> Vec<f64> {

@@ -478,7 +478,7 @@ mod tests {
         let mut w = World::new(Vec::new());
         let d = Dim::Ordinate { origin: [20.0, 15.0], feature: [90.0, 60.0], leader: [120.0, 60.0], x: false };
         let t = DimText { user: "", at: Some([128.0, 60.0]), rotation: None };
-        draw(&mut w, &d, &t, &s, &Affine::IDENTITY, Pen { color: 0, layer: 0, width: 0.0, dash: 0 });
+        draw(&mut w, &d, &t, &s, &Affine::IDENTITY, Pen { color: 0, layer: 0, width: 0.0, dash: 0, weight: 0 });
         let round = |p: &P| p.map(|v| (v * 100.0).round() / 100.0);
         assert_eq!(w.paths[0].points.iter().map(round).collect::<Vec<_>>(), [[90.63, 60.0], [116.05, 60.0], [121.05, 58.13], [129.95, 58.13]]);
         assert_eq!(w.texts[0].text, "45");
@@ -488,7 +488,7 @@ mod tests {
     #[test]
     fn radius_and_diameter_run_from_the_centre_or_far_end_to_the_text() {
         let s = DimStyle { arrow: 2.5, text: 2.5, gap: 0.625, above: true, horizontal: false, dec: 0, ..DimStyle::default() };
-        let pen = Pen { color: 0, layer: 0, width: 0.0, dash: 0 };
+        let pen = Pen { color: 0, layer: 0, width: 0.0, dash: 0, weight: 0 };
         let round = |p: P| p.map(|v| (v * 100.0).round() / 100.0);
         let k = std::f64::consts::FRAC_PI_4.cos();
         // Radius, text outside at 32√2 along: the line runs from the centre past the text "R25".
@@ -519,7 +519,7 @@ mod tests {
         let mut w = World::new(Vec::new());
         let d = Dim::Jogged { centre: [20.0, 15.0], chord: [76.0, 57.0], jog: [60.0, 45.0], shown_centre: [40.0, 25.0] };
         let t = DimText { user: "", at: Some([42.0, 30.0]), rotation: None };
-        draw(&mut w, &d, &t, &s, &Affine::IDENTITY, Pen { color: 0, layer: 0, width: 0.0, dash: 0 });
+        draw(&mut w, &d, &t, &s, &Affine::IDENTITY, Pen { color: 0, layer: 0, width: 0.0, dash: 0, weight: 0 });
         let round = |p: &P| p.map(|v| (v * 100.0).round() / 100.0);
         assert_eq!(w.paths[0].points.iter().map(round).collect::<Vec<_>>(), [[40.0, 25.0], [60.44, 48.09], [59.56, 41.91], [76.0, 57.0]]);
         assert_eq!(w.texts[0].text, "R70");

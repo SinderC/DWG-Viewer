@@ -25,7 +25,7 @@ pub fn decode(data: &[u8]) -> Result<dxf::Drawing, String> {
         .iter()
         .map(|l| {
             let (index, rgb) = color(&l.color);
-            Layer { name: l.name.clone(), color: rgb.unwrap_or_else(|| dxf::aci(index)), visible: l.is_visible(), linetype: l.line_type.clone() }
+            Layer { name: l.name.clone(), color: rgb.unwrap_or_else(|| dxf::aci(index)), visible: l.is_visible(), linetype: l.line_type.clone(), weight: l.line_weight.value() }
         })
         .collect();
     let units = dxf::units_name(doc.header.insertion_units.into());
@@ -400,7 +400,7 @@ impl<'a> Builder<'a> {
         }
         let own = if c.layer.is_empty() { "0" } else { c.layer.as_str() };
         let (index, rgb) = color(&c.color);
-        Some(dxf::style(&mut self.world, own, rgb, index, (&c.linetype, c.linetype_scale), ctx))
+        Some(dxf::style(&mut self.world, own, rgb, index, (&c.linetype, c.linetype_scale), c.line_weight.value().into(), ctx))
     }
 
     /// Draws a multileader: its lines and text, arrowheads (blocks or the default) and block content.

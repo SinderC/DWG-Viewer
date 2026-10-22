@@ -882,7 +882,7 @@ impl<'w> State<'w> {
             0 if dark => BACKGROUND,
             c => pen_color(c),
         };
-        Pen { color, layer, width: self.weight.max(0) as f64 * self.scale(), dash: 0 }
+        Pen { color, layer, width: self.weight.max(0) as f64 * self.scale(), dash: 0, weight: 0 }
     }
 
     fn pen(&mut self) -> Pen {

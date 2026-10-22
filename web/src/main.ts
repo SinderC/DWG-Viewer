@@ -369,6 +369,7 @@ function showPage(file: OpenFile, page: number): void {
     syncLayers();
     measure.a = measure.b = measure.hover = null;
     findButton.hidden = gridButton.hidden = doc.kind !== 'vector';
+    weightsButton.hidden = doc.kind !== 'vector' || !doc.weighted;
     if (findButton.hidden) toggleFind(false);
     pageLabel.textContent = `${page + 1} / ${doc.pageCount}`;
     start.hidden = true;
@@ -512,6 +513,10 @@ const gridButton = $<HTMLButtonElement>('grid');
 const toggleGrid = () => gridButton.setAttribute('aria-pressed', String(viewer.toggleGrid()));
 gridButton.addEventListener('click', toggleGrid);
 
+const weightsButton = $<HTMLButtonElement>('weights');
+const toggleWeights = () => weightsButton.setAttribute('aria-pressed', String(viewer.toggleWeights()));
+weightsButton.addEventListener('click', toggleWeights);
+
 const mac = /Mac|iPhone|iPad/.test(navigator.userAgent);
 
 interface Shortcut {
@@ -534,6 +539,7 @@ const shortcuts: Shortcut[] = [
   { keys: ['1'], label: 'Actual pixels', run: () => viewer.actualSize(), when: () => !!current && !actualSize.hidden, button: 'actual' },
   { keys: ['i'], label: 'Paper: dark blue, white, black', run: nextPaper, button: 'invert' },
   { keys: ['g'], label: 'Show or hide the grid', run: toggleGrid, when: () => !gridButton.hidden, button: 'grid' },
+  { keys: ['w'], label: 'Show or hide line weights', run: toggleWeights, when: () => !weightsButton.hidden, button: 'weights' },
   { keys: ['l'], label: 'Show or hide layers', run: () => toggleLayersPanel(), when: () => !layersButton.hidden, button: 'layers' },
   { keys: ['ArrowLeft', 'PageUp'], label: 'Previous page', run: () => turnPage(-1), button: 'prev-page' },
   { keys: ['ArrowRight', 'PageDown'], label: 'Next page', run: () => turnPage(1), button: 'next-page' },

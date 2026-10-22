@@ -35,9 +35,9 @@ export const PAPERS: { name: string; invert: boolean; tint?: string }[] = [
 ];
 export type Paper = (typeof PAPERS)[number];
 
-/** Draws the `width` × `height` viewport of `doc` onto `ctx` on `paper`. */
-export function drawDocument(ctx: CanvasRenderingContext2D, doc: DrawingDocument, view: View, width: number, height: number, paper: Paper): void {
-  if (doc.kind === 'vector') doc.draw(ctx, view, paper.invert);
+/** Draws the `width` × `height` viewport of `doc` onto `ctx` on `paper`, with line weights if `weights`. */
+export function drawDocument(ctx: CanvasRenderingContext2D, doc: DrawingDocument, view: View, width: number, height: number, paper: Paper, weights = false): void {
+  if (doc.kind === 'vector') doc.draw(ctx, view, paper.invert, weights);
   else ctx.putImageData(doc.render(view, width, height, paper.invert), 0, 0);
   if (!paper.tint) return;
   ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -96,6 +96,7 @@ export class Viewer {
   private drag: { x: number; y: number; t: number }[] | null = null;
   private paperIndex = 0;
   private grid = false;
+  private weights = false;
   private frame = 0;
   private motion: Motion | null = null;
   /** The springs of a running view animation: log scale, then the drawing point at the canvas centre. */
@@ -140,6 +141,13 @@ export class Viewer {
     this.paperIndex = (this.paperIndex + 1) % PAPERS.length;
     this.redraw();
     return this.paper;
+  }
+
+  /** Shows line weights on vector drawings, or draws every line thin. Returns the new state. */
+  toggleWeights(): boolean {
+    this.weights = !this.weights;
+    this.redraw();
+    return this.weights;
   }
 
   /** Shows or hides the grid on vector drawings. Returns the new state. */
@@ -394,7 +402,7 @@ export class Viewer {
       this.docDirty = false;
       const started = performance.now();
       if (this.doc && (this.doc.kind === 'vector' || (width > 0 && height > 0))) {
-        drawDocument(this.ctx, this.doc, this.view, width, height, this.paper);
+        drawDocument(this.ctx, this.doc, this.view, width, height, this.paper, this.weights);
         if (this.grid && this.doc.kind === 'vector') drawGrid(this.ctx, this.view, this.doc.origin, this.paper.invert);
       } else {
         this.ctx.clearRect(0, 0, width, height);
