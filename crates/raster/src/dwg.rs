@@ -61,6 +61,16 @@ pub fn decode(data: &[u8]) -> Result<dxf::Drawing, String> {
     b.world.finish(units, info)
 }
 
+/// What an entity with properties `c` passes on as a parent, and its pen; None if it is invisible.
+fn style<'a>(w: &mut World, c: &'a EntityCommon, ctx: &Ctx<'a>) -> Option<(Parent<'a>, Pen)> {
+    if c.invisible {
+        return None;
+    }
+    let own = if c.layer.is_empty() { "0" } else { c.layer.as_str() };
+    let (index, rgb) = color(&c.color);
+    Some(dxf::style(w, own, rgb, index, (&c.linetype, c.linetype_scale), c.line_weight.value().into(), ctx))
+}
+
 fn xy(v: Vector3) -> P {
     [v.x, v.y]
 }
@@ -202,7 +212,7 @@ struct Builder<'a> {
 
 impl<'a> Builder<'a> {
     fn entity(&mut self, e: &'a EntityType, ctx: &Ctx<'a>) {
-        let Some((parent, pen)) = self.style(e.common(), ctx) else { return };
+        let Some((parent, pen)) = style(&mut self.world, e.common(), ctx) else { return };
         let (m, w) = (ctx.m, &mut self.world);
         let ocs = |normal: Vector3| m.then(&Affine::extrusion(normal.z));
         match e {
@@ -227,7 +237,13 @@ impl<'a> Builder<'a> {
             EntityType::PolyfaceMesh(p) => {
                 let verts: Vec<P> = p.vertices.iter().map(|v| xy(v.location)).collect();
                 let faces: Vec<[i64; 4]> = p.faces.iter().map(|f| [f.index1, f.index2, f.index3, f.index4].map(i64::from)).collect();
-                dxf::polyface_edges(&verts, &faces).into_iter().for_each(|edge| w.path(edge, &m, pen));
+                // Each face has its own layer, colour, linetype and weight; an invisible one draws nothing.
+                let pens: Vec<Option<Pen>> = p.faces.iter().map(|f| style(w, &f.common, ctx).map(|s| s.1)).collect();
+                for (f, edge) in dxf::polyface_edges(&verts, &faces) {
+                    if let Some(pen) = pens[f] {
+                        w.path(edge, &m, pen);
+                    }
+                }
             }
             EntityType::PolygonMesh(p) => {
                 let verts: Vec<P> = p.vertices.iter().map(|v| xy(v.location)).collect();
@@ -331,7 +347,7 @@ impl<'a> Builder<'a> {
                     self.expand(&i.block_name, cell, parent, ctx);
                 }
                 for a in i.attributes.iter().filter(|a| !a.flags.invisible) {
-                    if let Some((_, pen)) = self.style(&a.common, ctx) {
+                    if let Some((_, pen)) = style(&mut self.world, &a.common, ctx) {
                         attribute(&mut self.world, a, &m, pen);
                     }
                 }
@@ -393,15 +409,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// What the entity passes on as a parent, and its pen; None if it is invisible.
-    fn style(&mut self, c: &'a EntityCommon, ctx: &Ctx<'a>) -> Option<(Parent<'a>, Pen)> {
-        if c.invisible {
-            return None;
-        }
-        let own = if c.layer.is_empty() { "0" } else { c.layer.as_str() };
-        let (index, rgb) = color(&c.color);
-        Some(dxf::style(&mut self.world, own, rgb, index, (&c.linetype, c.linetype_scale), c.line_weight.value().into(), ctx))
-    }
 
     /// Draws a multileader: its lines and text, arrowheads (blocks or the default) and block content.
     fn multileader(&mut self, ml: &MultiLeader, m: Affine, parent: Parent<'a>, line: Pen, text: Pen, ctx: &Ctx<'a>) {

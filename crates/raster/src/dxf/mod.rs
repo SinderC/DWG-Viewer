@@ -1339,17 +1339,18 @@ pub(crate) fn text_shape(flags: i64, oblique: f64, at: P, rotation: f64) -> Affi
 }
 
 /// Unique edges of polyface `faces` (1-based vertex indices into `verts`, 0 for none; a negative
-/// index hides the edge that starts there), as two-point paths.
-pub(crate) fn polyface_edges(verts: &[P], faces: &[[i64; 4]]) -> Vec<Vec<P>> {
+/// index hides the edge that starts there), as two-point paths with the index of the face that
+/// draws them (the first to have them).
+pub(crate) fn polyface_edges(verts: &[P], faces: &[[i64; 4]]) -> Vec<(usize, Vec<P>)> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
-    for face in faces {
+    for (f, face) in faces.iter().enumerate() {
         let idx: Vec<i64> = face.iter().copied().filter(|&i| i != 0).collect();
         for k in 0..idx.len() {
             let (a, b) = (idx[k], idx[(k + 1) % idx.len()]);
             let (Some(&p), Some(&q)) = (verts.get(a.unsigned_abs() as usize - 1), verts.get(b.unsigned_abs() as usize - 1)) else { continue };
             if a > 0 && seen.insert((a.abs().min(b.abs()), a.abs().max(b.abs()))) {
-                out.push(vec![p, q]);
+                out.push((f, vec![p, q]));
             }
         }
     }
@@ -1447,11 +1448,17 @@ impl<'a, 'b> Builder<'a, 'b> {
             "POLYLINE" => {
                 let flags = r.i(70, 0);
                 let vertices = e.children.iter().filter(|v| v.kind == "VERTEX");
-                // Polyface mesh: vertices (flag 64) and faces (128 alone) listing up to four 1-based vertex indices.
+                // Polyface mesh: vertices (flag 64) and faces (128 alone) listing up to four 1-based vertex
+                // indices. Each face has its own layer, colour, linetype and weight, as AutoCAD draws it.
                 if flags & 64 != 0 {
                     let verts: Vec<P> = vertices.clone().filter(|v| v.i(70, 0) & 64 != 0).map(|v| v.point(10)).collect();
-                    let faces: Vec<[i64; 4]> = vertices.filter(|v| v.i(70, 0) & 192 == 128).map(|v| [71, 72, 73, 74].map(|c| v.i(c, 0))).collect();
-                    polyface_edges(&verts, &faces).into_iter().for_each(|edge| w.path(edge, &m, pen));
+                    let face_records: Vec<&Record> = vertices.filter(|v| v.i(70, 0) & 192 == 128).collect();
+                    let faces: Vec<[i64; 4]> = face_records.iter().map(|v| [71, 72, 73, 74].map(|c| v.i(c, 0))).collect();
+                    let pens: Vec<Pen> = face_records
+                        .iter()
+                        .map(|f| style(w, f.get(8).map_or("0", str::trim), true_color(f), f.i(62, 256), (f.get(6).unwrap_or(""), f.f(48, 1.0)), f.i(370, -1), ctx).1)
+                        .collect();
+                    polyface_edges(&verts, &faces).into_iter().for_each(|(f, edge)| w.path(edge, &m, pens[f]));
                     return;
                 }
                 // Polygon mesh: M × N vertices (71, 72), closed in M (flag 1) and N (32).
@@ -1486,7 +1493,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             }
             "MESH" => {
                 let (verts, faces) = subd_mesh(r);
-                polyface_edges(&verts, &faces).into_iter().for_each(|edge| w.path(edge, &m, pen));
+                polyface_edges(&verts, &faces).into_iter().for_each(|(_, edge)| w.path(edge, &m, pen));
             }
             "MLINE" => mline(r).into_iter().for_each(|line| w.path(line, &m, pen)),
             "WIPEOUT" => {
@@ -2119,11 +2126,27 @@ mod tests {
     }
 
     #[test]
+    fn polyface_faces_draw_in_their_own_colour() {
+        // A yellow polyface whose one face record is red.
+        let d = decode(&entities(&[
+            (0, "POLYLINE"), (62, "2"), (66, "1"), (70, "64"), (71, "3"), (72, "1"),
+            (0, "VERTEX"), (10, "0"), (20, "0"), (70, "192"),
+            (0, "VERTEX"), (10, "1"), (20, "0"), (70, "192"),
+            (0, "VERTEX"), (10, "0"), (20, "1"), (70, "192"),
+            (0, "VERTEX"), (62, "1"), (10, "0"), (20, "0"), (70, "128"), (71, "1"), (72, "2"), (73, "3"),
+            (0, "SEQEND"),
+        ]))
+        .unwrap();
+        assert_eq!(d.paths.len(), 3);
+        assert!(d.paths.iter().all(|p| p.color == color::aci(1)));
+    }
+
+    #[test]
     fn polyface_edges_are_shared_and_hidden() {
         let verts = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
         // Two triangles sharing the diagonal 1–3 (drawn once); the second hides its edge 3–4.
         let edges = polyface_edges(&verts, &[[1, 2, 3, 0], [-3, 4, 1, 0]]);
-        assert_eq!(edges, vec![vec![verts[0], verts[1]], vec![verts[1], verts[2]], vec![verts[2], verts[0]], vec![verts[3], verts[0]]]);
+        assert_eq!(edges, vec![(0, vec![verts[0], verts[1]]), (0, vec![verts[1], verts[2]]), (0, vec![verts[2], verts[0]]), (1, vec![verts[3], verts[0]])]);
         let grid = mesh_grid(&verts, 2, 2, false, true);
         assert_eq!(grid.len(), 4);
         assert_eq!(grid[0].len(), 3, "closed in N repeats the first vertex");

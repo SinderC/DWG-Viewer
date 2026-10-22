@@ -58,6 +58,11 @@ impl Sheet {
 
     fn put(&mut self, layer: &str, mut e: EntityType) {
         e.common_mut().layer = layer.into();
+        // Polyface vertices and faces are records of their own, and AutoCAD draws a face on its layer.
+        if let EntityType::PolyfaceMesh(pf) = &mut e {
+            pf.vertices.iter_mut().for_each(|v| v.common.layer = layer.into());
+            pf.faces.iter_mut().for_each(|f| f.common.layer = layer.into());
+        }
         self.doc.add_entity(e).unwrap();
     }
 
