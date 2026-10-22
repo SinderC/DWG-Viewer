@@ -271,18 +271,24 @@ pub(crate) fn draw(w: &mut World, d: &Dim, t: &DimText, s: &DimStyle, m: &Affine
                 p
             };
             let sign = if leader[k] >= feature[k] { 1.0 } else { -1.0 };
-            let start = pt(feature[k] + sign * s.ext_offset, feature[j]);
-            let path = if (leader[j] - feature[j]).abs() < 1e-9 {
-                vec![start, leader]
-            } else {
-                vec![start, pt(leader[k] - sign * 2.0 * s.arrow, feature[j]), pt(leader[k] - sign * s.arrow, leader[j]), leader]
-            };
+            let Some(text) = s.length(t.user, "", (feature[j] - origin[j]).abs()) else { return };
+            // The text sits past the leader end (or where the file puts it); AutoCAD then runs the
+            // leader under the whole text, above it with DIMTAD, doglegging over 2 arrow sizes that
+            // end 2 arrow sizes before the text. Digits are taken as 0.78 of the height wide (Arial).
+            let width = 0.78 * s.text * text.chars().count() as f64;
+            let at = t.at.unwrap_or(pt(leader[k] + sign * width / 2.0, leader[j]));
+            // Text reads along the leader, so its up is −X on an X ordinate and +Y on a Y ordinate.
+            let below = if s.above { s.gap + s.text / 2.0 } else { 0.0 };
+            let across = at[j] + if x { below } else { -below };
+            let first = at[k] - sign * width / 2.0;
+            let mut path = vec![pt(feature[k] + sign * s.ext_offset, feature[j])];
+            if (across - feature[j]).abs() > 1e-9 {
+                path.extend([pt(first - sign * 4.0 * s.arrow, feature[j]), pt(first - sign * 2.0 * s.arrow, across)]);
+            }
+            path.push(pt(first + sign * width, across));
             line(w, path);
             let along = if x { FRAC_PI_2 } else { 0.0 };
-            let default = pt(leader[k] + sign * (s.gap + s.text), leader[j]);
-            let text = s.length(t.user, "", (feature[j] - origin[j]).abs());
-            let Some(text) = text else { return };
-            w.push_text(t.at.unwrap_or(default), t.rotation.unwrap_or(along), s.text, 1.0, (1, 2), text, m, pen);
+            w.push_text(at, t.rotation.unwrap_or(along), s.text, 1.0, (1, 2), text, m, pen);
         }
         Dim::Jogged { centre, chord, jog, shown_centre } => {
             let u = unit(sub(chord, centre));
@@ -424,6 +430,20 @@ mod tests {
         assert_eq!(s.length("<> TYP", "R", 10.0).as_deref(), Some("R10.0 TYP"));
         assert_eq!(s.length("CUSTOM", "", 10.0).as_deref(), Some("CUSTOM"));
         assert_eq!(s.length(" ", "", 10.0), None);
+    }
+
+    /// The Y ordinate of the extended baseline as AutoCAD drew it with ISO-25: text "45" centred at
+    /// (128, 60) above the line, so the leader doglegs down to y = 58.125 and runs under the text.
+    #[test]
+    fn ordinate_leader_doglegs_under_text_above() {
+        let s = DimStyle { arrow: 2.5, text: 2.5, ext_offset: 0.625, gap: 0.625, above: true, dec: 0, ..DimStyle::default() };
+        let mut w = World::new(Vec::new());
+        let d = Dim::Ordinate { origin: [20.0, 15.0], feature: [90.0, 60.0], leader: [120.0, 60.0], x: false };
+        let t = DimText { user: "", at: Some([128.0, 60.0]), rotation: None };
+        draw(&mut w, &d, &t, &s, &Affine::IDENTITY, Pen { color: 0, layer: 0, width: 0.0, dash: 0 });
+        let round = |p: &P| p.map(|v| (v * 100.0).round() / 100.0);
+        assert_eq!(w.paths[0].points.iter().map(round).collect::<Vec<_>>(), [[90.63, 60.0], [116.05, 60.0], [121.05, 58.13], [129.95, 58.13]]);
+        assert_eq!(w.texts[0].text, "45");
     }
 
     #[test]

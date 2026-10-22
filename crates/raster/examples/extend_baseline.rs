@@ -117,6 +117,34 @@ fn text(s: &str, at: Vector3, h: f64) -> EntityType {
     EntityType::Text(Text::with_value(s, at).with_height(h))
 }
 
+/// Width of `s` in Arial (the Standard style's font) at text height `h`, from Arial's advance widths
+/// per 1000 em and its cap height of 716.
+fn arial_width(s: &str, h: f64) -> f64 {
+    const LOWER: [u16; 26] = [556, 556, 500, 556, 556, 278, 556, 556, 222, 222, 500, 222, 833, 556, 556, 556, 556, 333, 500, 278, 556, 500, 722, 500, 500, 500];
+    const UPPER: [u16; 26] = [667, 667, 722, 722, 667, 611, 778, 722, 278, 500, 667, 556, 833, 722, 778, 667, 778, 722, 667, 611, 722, 667, 944, 667, 667, 611];
+    let em: u32 = s.bytes().map(|b| match b {
+        b'a'..=b'z' => LOWER[(b - b'a') as usize] as u32,
+        b'A'..=b'Z' => UPPER[(b - b'A') as usize] as u32,
+        b'0'..=b'9' => 556,
+        _ => 278,
+    }).sum();
+    em as f64 / 716. * h
+}
+
+/// A justified TEXT at `at`. AutoCAD draws a TEXT from its insertion point as stored, so that
+/// point is set to where the left end of the baseline lands (descent taken as 0.3·height).
+fn justified(s: &str, at: Vector3, h: f64, ha: TextHorizontalAlignment, va: TextVerticalAlignment) -> Text {
+    use TextHorizontalAlignment as H;
+    use TextVerticalAlignment as V;
+    let dx = match ha { H::Center | H::Middle => 0.5, H::Right => 1., _ => 0. } * arial_width(s, h);
+    let dy = match (ha, va) { (H::Middle, _) | (_, V::Middle) => 0.5 * h, (_, V::Top) => h, (_, V::Bottom) => -0.3 * h, _ => 0. };
+    let mut t = Text::with_value(s.to_string(), at - v(dx, dy)).with_height(h);
+    t.horizontal_alignment = ha;
+    t.vertical_alignment = va;
+    t.alignment_point = Some(at);
+    t
+}
+
 fn colored(mut e: EntityType, c: Color) -> EntityType {
     e.common_mut().color = c;
     e
@@ -236,11 +264,7 @@ fn build(s: &mut Sheet) {
         for (row, va) in [V::Top, V::Middle, V::Baseline, V::Bottom].into_iter().enumerate() {
             for (col, ha) in [H::Left, H::Center, H::Right].into_iter().enumerate() {
                 let at = o.p(25. + col as f64 * 45., 72. - row as f64 * 18.);
-                let mut t = Text::with_value(format!("{ha:?}{va:?}"), at).with_height(3.5);
-                t.horizontal_alignment = ha;
-                t.vertical_alignment = va;
-                t.alignment_point = Some(at);
-                out.push(EntityType::Text(t));
+                out.push(EntityType::Text(justified(&format!("{ha:?}{va:?}"), at, 3.5, ha, va)));
                 out.push(colored(line(at - v(2., 0.), at + v(2., 0.)), Color::Index(1)));
                 out.push(colored(line(at - v(0., 2.), at + v(0., 2.)), Color::Index(1)));
             }
@@ -251,9 +275,15 @@ fn build(s: &mut Sheet) {
         let mut out = vec![];
         for (i, ha) in [TextHorizontalAlignment::Aligned, TextHorizontalAlignment::Fit, TextHorizontalAlignment::Middle].into_iter().enumerate() {
             let y = 70. - i as f64 * 25.;
-            let mut t = Text::with_value(format!("{ha:?} 10..130"), o.p(10., y)).with_height(5.);
-            t.horizontal_alignment = ha;
-            t.alignment_point = Some(if ha == TextHorizontalAlignment::Middle { o.p(70., y) } else { o.p(130., y) });
+            let label = format!("{ha:?} 10..130");
+            let t = if ha == TextHorizontalAlignment::Middle {
+                justified(&label, o.p(70., y), 5., ha, TextVerticalAlignment::Baseline)
+            } else {
+                let mut t = Text::with_value(label, o.p(10., y)).with_height(5.);
+                t.horizontal_alignment = ha;
+                t.alignment_point = Some(o.p(130., y));
+                t
+            };
             out.push(EntityType::Text(t));
             out.push(colored(line(o.p(10., y - 3.), o.p(130., y - 3.)), Color::Index(8)));
         }
