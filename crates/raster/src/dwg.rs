@@ -4,7 +4,7 @@
 use std::f64::consts::TAU;
 use std::io::Cursor;
 
-use acadrust::entities::{AttributeEntity, BoundaryEdge, BoundaryPath, EntityCommon, LeaderPathType};
+use acadrust::entities::{AttributeEntity, BoundaryEdge, BoundaryPath, EntityCommon, LeaderPathType, Region};
 use acadrust::types::{Color, Handle, Vector2, Vector3};
 use acadrust::{CadDocument, DwgReader, EntityType};
 
@@ -150,6 +150,11 @@ impl<'a> Builder<'a> {
             EntityType::Face3D(f) => {
                 let pts = [f.first_corner, f.second_corner, f.third_corner, f.fourth_corner, f.first_corner];
                 w.path(pts.map(xy).to_vec(), &m, pen);
+            }
+            EntityType::Region(Region { acis_data, .. }) => {
+                for edge in dxf::acis::read(&acis_data.sat_data, &acis_data.sab_data).as_ref().map(dxf::acis::edges).unwrap_or_default() {
+                    w.path(edge, &m, pen);
+                }
             }
             EntityType::Spline(s) => {
                 let ctrl: Vec<_> = s.control_points.iter().copied().map(xy).collect();

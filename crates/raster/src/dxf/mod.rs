@@ -8,12 +8,14 @@
 //!
 //! The output side (`World`, `Affine`, `style`, text and spline helpers) is shared with `dwg` and `hpgl`.
 
+pub(crate) mod acis;
 mod color;
 pub(crate) mod parse;
 
 use std::collections::{BTreeMap, HashMap};
 use std::f64::consts::TAU;
 
+use acadrust::entities::solid3d::AcisData;
 pub(crate) use color::aci;
 pub use color::{BACKGROUND, FOREGROUND};
 use parse::{Pair, Record};
@@ -161,6 +163,7 @@ pub fn decode(data: &[u8]) -> Result<Drawing, String> {
     let mut dimstyles = Vec::new();
     let mut blocks = HashMap::new();
     let mut entities = Vec::new();
+    let mut acis = HashMap::new();
     let mut found_section = false;
     let mut i = 0;
     while i < records.len() {
@@ -182,6 +185,7 @@ pub fn decode(data: &[u8]) -> Result<Drawing, String> {
             }
             Some("BLOCKS") => blocks = parse_blocks(body),
             Some("ENTITIES") => entities = group(body),
+            Some("ACDSDATA") => acis = acds_data(body),
             _ => {}
         }
         i = end + 1;
@@ -200,7 +204,7 @@ pub fn decode(data: &[u8]) -> Result<Drawing, String> {
     let header_f = |name: &str, default: f64| header_var(header, name).and_then(|v| v.parse().ok()).unwrap_or(default);
     let (dimasz, dimscale) = (header_f("$DIMASZ", 0.18), header_f("$DIMSCALE", 1.0));
     let arrow_sizes = dimstyles.iter().map(|r| (r.name(2), arrow_size(r.f(41, dimasz), r.f(40, dimscale)))).collect();
-    let mut b = Builder { blocks: &blocks, world: World::new(layers), arrow_sizes, arrow_size: arrow_size(dimasz, dimscale) };
+    let mut b = Builder { blocks: &blocks, world: World::new(layers), arrow_sizes, arrow_size: arrow_size(dimasz, dimscale), acis };
     let ltscale = header_var(header, "$LTSCALE").and_then(|v| v.parse().ok()).unwrap_or(1.0);
     // Complex linetypes (element type 74 non-zero: shapes or text in the gaps) are drawn solid.
     for lt in linetypes.iter().filter(|r| r.pairs.iter().all(|p| p.code != 74 || p.value.trim() == "0")) {
@@ -1081,6 +1085,8 @@ struct Builder<'a, 'b> {
     /// Leader arrow size by upper-case dimension style name, and for styles not listed.
     arrow_sizes: HashMap<String, f64>,
     arrow_size: f64,
+    /// SAB data of ACIS entities (R2013+), by upper-case entity handle.
+    acis: HashMap<String, Vec<u8>>,
 }
 
 impl<'a, 'b> Builder<'a, 'b> {
@@ -1206,6 +1212,14 @@ impl<'a, 'b> Builder<'a, 'b> {
             }
             // A dimension's lines, arrows and text are in an anonymous block, already in world coordinates.
             "DIMENSION" => self.expand(&r.name(2), m, parent, ctx),
+            "REGION" => {
+                // SAT text (encoded) before R2013, then SAB data in the ACDSDATA section.
+                let sat: String = r.pairs.iter().filter(|p| matches!(p.code, 1 | 3)).map(|p| if p.code == 1 { format!("{}\n", p.value) } else { p.value.to_string() }).collect();
+                let sab = self.acis.get(&r.name(5)).map_or(&[][..], Vec::as_slice);
+                for edge in acis::read(&AcisData::decode_sat(&sat), sab).as_ref().map(acis::edges).unwrap_or_default() {
+                    w.path(edge, &m, pen);
+                }
+            }
             // Attribute definitions show as ATTRIBs on the INSERT instead.
             "ATTDEF" => {}
             kind => w.skip(kind),
@@ -1244,6 +1258,16 @@ impl<'a, 'b> Builder<'a, 'b> {
             self.entity(e, &inner);
         }
     }
+}
+
+/// SAB data of the ACDSDATA section's ASM_Data records, by upper-case owner entity handle.
+fn acds_data(records: &[Record]) -> HashMap<String, Vec<u8>> {
+    let hex = |s: &str| (0..s.len() / 2).filter_map(|i| u8::from_str_radix(s.get(2 * i..2 * i + 2)?, 16).ok()).collect::<Vec<u8>>();
+    records
+        .iter()
+        .filter(|r| r.kind == "ACDSRECORD" && r.pairs.iter().any(|p| p.code == 2 && p.value.trim() == "ASM_Data"))
+        .map(|r| (r.name(320), r.pairs.iter().filter(|p| p.code == 310).flat_map(|p| hex(p.value.trim())).collect()))
+        .collect()
 }
 
 /// Reads groups in file order, as the HATCH boundary and pattern data needs.
@@ -1872,6 +1896,39 @@ mod tests {
         let t = &d.texts[0];
         assert_eq!((t.text.as_str(), t.halign, t.valign), ("Ø10", 1, 2));
         assert!(close(t.up, [0.0, -2.0]));
+    }
+
+    /// A DXF with one `kind` entity whose ACIS data is `body`, as SAB in the ACDSDATA section.
+    fn acis_dxf(kind: &str, body: &acadrust::entities::acis::SatDocument) -> Drawing {
+        let hex: String = acadrust::entities::acis::SabWriter::write(body).iter().map(|b| format!("{b:02X}")).collect();
+        decode(&dxf(&[
+            (0, "SECTION"), (2, "ENTITIES"), (0, kind), (5, "2A"), (8, "0"), (0, "ENDSEC"),
+            (0, "SECTION"), (2, "ACDSDATA"), (0, "ACDSRECORD"), (320, "2A"), (2, "ASM_Data"), (310, &hex), (0, "ENDSEC"), (0, "EOF"),
+        ]))
+        .unwrap()
+    }
+
+    #[test]
+    fn region_edges_from_acds_data() {
+        use acadrust::entities::acis::{SatDocument, SatPointer, Sense};
+        // A half disc: the diameter from (2, 0) to (-2, 0), and the arc back through (0, 2).
+        let mut body = SatDocument::new_body();
+        let ptr = |i: i32| SatPointer::new(i);
+        let (a, b) = (body.add_point(2.0, 0.0, 0.0), body.add_point(-2.0, 0.0, 0.0));
+        let (va, vb) = (body.add_vertex(SatPointer::NULL, ptr(a)), body.add_vertex(SatPointer::NULL, ptr(b)));
+        let line = body.add_straight_curve([2.0, 0.0, 0.0], [-1.0, 0.0, 0.0]);
+        let circle = body.add_ellipse_curve([0.0; 3], [0.0, 0.0, 1.0], [2.0, 0.0, 0.0], 1.0);
+        body.add_edge(ptr(va), 0.0, ptr(vb), 4.0, SatPointer::NULL, ptr(line), Sense::Forward);
+        body.add_edge(ptr(vb), 0.0, ptr(va), 0.0, SatPointer::NULL, ptr(circle), Sense::Reversed);
+        let d = acis_dxf("REGION", &body);
+        assert_eq!(d.paths.len(), 2);
+        assert_eq!(d.paths[0].points.len(), 2);
+        // Reversed against the anticlockwise circle, the arc from (-2, 0) to (2, 0) runs clockwise,
+        // over the top: 2 above the diameter, which is drawn y down.
+        let diameter = d.paths[0].points[0][1];
+        let ys: Vec<f64> = d.paths[1].points.iter().map(|p| p[1]).collect();
+        assert!((ys.iter().copied().fold(f64::INFINITY, f64::min) - (diameter - 2.0)).abs() < 1e-9);
+        assert!(ys.iter().all(|&y| y <= diameter + 1e-9));
     }
 
     #[test]
