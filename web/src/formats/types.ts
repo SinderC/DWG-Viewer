@@ -32,6 +32,13 @@ export interface TextHit {
   corners: [number, number][];
 }
 
+/** A point the measure tool snaps to, in drawing coordinates. */
+export interface SnapPoint {
+  x: number;
+  y: number;
+  kind: 'end' | 'mid' | 'centre';
+}
+
 export interface VectorDocument {
   kind: 'vector';
   /** Extents in drawing units. */
@@ -52,6 +59,8 @@ export interface VectorDocument {
   draw(ctx: CanvasRenderingContext2D, view: View, invert: boolean, weights: boolean): void;
   /** Texts on visible layers containing `query`, ignoring case, in file order. */
   findText(query: string): TextHit[];
+  /** The line end, midpoint or centre on a visible layer nearest to (x, y) within `radius`, in drawing units. */
+  snap(x: number, y: number, radius: number): SnapPoint | null;
   free(): void;
 }
 

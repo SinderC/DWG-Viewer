@@ -1,3 +1,4 @@
+import { SnapPoints } from './snap';
 import type { FormatPlugin, Layer, TextHit, VectorDocument, View } from './types';
 import { DxfDoc, dxfBackground, dxfForeground, infoRows, RasterDoc, renderRaster } from './wasm';
 
@@ -162,8 +163,11 @@ function dashes(doc: DxfDoc): number[][] {
   return Array.from(doc.dashCounts(), (n) => Array.from(lengths.subarray(k, (k += n))));
 }
 
-/** Builds one Path2D per layer, colour, width and dash pattern, so a frame is a handful of stroke() calls. */
-function strokes(doc: DxfDoc): Map<number, Map<string, Stroke>> {
+/**
+ * Builds one Path2D per layer, colour, width and dash pattern, so a frame is a handful of stroke() calls.
+ * Also returns the snap points: line ends, segment midpoints, arc ends and centres.
+ */
+function strokes(doc: DxfDoc): [Map<number, Map<string, Stroke>>, SnapPoints] {
   const patterns = dashes(doc);
   const byLayer = new Map<number, Map<string, Stroke>>();
   const pathFor = (layer: number, color: number, width: number, dash: number, weight: number, dot = false) => {
@@ -185,6 +189,9 @@ function strokes(doc: DxfDoc): Map<number, Map<string, Stroke>> {
   const pathDashes = doc.pathDashes();
   const layers = doc.pathLayers();
   const weights = doc.pathWeights();
+  const arcs = doc.arcs();
+  // Each vertex is an end, and all but a path's first also add a midpoint; each arc adds a centre and two ends.
+  const snaps = new SnapPoints(points.length + (3 * arcs.length) / 8);
   let k = 0;
   doc.pathLengths().forEach((n, i) => {
     let dot = true;
@@ -192,11 +199,16 @@ function strokes(doc: DxfDoc): Map<number, Map<string, Stroke>> {
     const path = pathFor(layers[i], colors[i], widths[i], pathDashes[i], weights[i], dot);
     path.moveTo(points[k], points[k + 1]);
     for (let j = 1; j < n; j++) path.lineTo(points[k + 2 * j], points[k + 2 * j + 1]);
+    for (let j = 0; j < n; j++) {
+      const [x, y] = [points[k + 2 * j], points[k + 2 * j + 1]];
+      snaps.add(x, y, 'end', layers[i]);
+      const [px, py] = [points[k + 2 * j - 2], points[k + 2 * j - 1]];
+      if (j > 0 && (x !== px || y !== py)) snaps.add((x + px) / 2, (y + py) / 2, 'mid', layers[i]);
+    }
     k += 2 * n;
   });
 
   // Each arc is the unit circle from t0 to t1, mapped by [u v centre].
-  const arcs = doc.arcs();
   const arcLayers = doc.arcLayers();
   const arcWidths = doc.arcWidths();
   const arcDashes = doc.arcDashes();
@@ -206,8 +218,12 @@ function strokes(doc: DxfDoc): Map<number, Map<string, Stroke>> {
     const unit = new Path2D();
     unit.ellipse(0, 0, 1, 1, 0, t0, t1, t1 < t0);
     pathFor(arcLayers[i], color, arcWidths[i], arcDashes[i], arcWeights[i]).addPath(unit, new DOMMatrix([ux, uy, vx, vy, cx, cy]));
+    snaps.add(cx, cy, 'centre', arcLayers[i]);
+    if (Math.abs(t1 - t0) < 2 * Math.PI - 1e-9) {
+      for (const t of [t0, t1]) snaps.add(cx + ux * Math.cos(t) + vx * Math.sin(t), cy + uy * Math.cos(t) + vy * Math.sin(t), 'end', arcLayers[i]);
+    }
   });
-  return byLayer;
+  return [byLayer, snaps];
 }
 
 /** One Path2D per fill, its rings as subpaths, in file order. */
@@ -567,7 +583,7 @@ export function vectorDocument(doc: DxfDoc): VectorDocument {
   try {
     const pictures = images(doc);
     const areas = fills(doc);
-    const paths = strokes(doc);
+    const [paths, snaps] = strokes(doc);
     const labels = texts(doc);
     const layerList = layers(doc);
     const page = doc.background();
@@ -653,6 +669,7 @@ export function vectorDocument(doc: DxfDoc): VectorDocument {
           .filter((t) => layerList[t.layer].visible && t.lines.join(' ').toLowerCase().includes(needle))
           .map((t): TextHit => ({ text: t.lines.join(' '), corners: textBox(t) }));
       },
+      snap: (x, y, radius) => snaps.nearest(x, y, radius, (layer) => layerList[layer].visible),
       free: () => pictures.forEach((image) => image.raster.free()),
     };
   } finally {
