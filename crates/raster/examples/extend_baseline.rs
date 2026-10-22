@@ -472,7 +472,7 @@ fn build(s: &mut Sheet) {
     s.add("TOLERANCE (GD&T)", |_, o| {
         let mut t = Tolerance::with_text(o.p(10., 60.), "{\\Fgdt;j}%%v{\\Fgdt;n}0.05{\\Fgdt;m}%%vA%%vB%%vC");
         t.dimension_style_name = "ISO-25".into();
-        let mut u = Tolerance::with_text(o.p(10., 30.), "{\\Fgdt;u}%%v0.1%%v^J{\\Fgdt;r}%%v0.02%%vA");
+        let mut u = Tolerance::with_text(o.p(10., 30.), "{\\Fgdt;u}%%v0.1^J{\\Fgdt;r}%%v0.02%%vA");
         u.dimension_style_name = "ISO-25".into();
         vec![EntityType::Tolerance(t), EntityType::Tolerance(u)]
     });
@@ -683,6 +683,15 @@ fn main() {
         .collect();
     s.doc.classes.update_defaults();
     println!("classes added: {missing:?}");
+    // A frame's rows are split by ^J in DXF text and by a newline in DWG; acadrust's DXF writer
+    // would turn a newline into \P, so the text is kept with ^J until here.
+    if dwg(output) {
+        for e in s.doc.entities_mut() {
+            if let EntityType::Tolerance(t) = e {
+                t.text = t.text.replace("^J", "\n");
+            }
+        }
+    }
     println!("{} cells, {} → {} entities", s.count, before, s.doc.entity_count());
     if dwg(output) {
         DwgWriter::write_to_file(output, &s.doc).unwrap();

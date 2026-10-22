@@ -414,7 +414,7 @@ fn gdt(c: char) -> char {
     }
 }
 
-/// The cells of a feature control frame, row by row: `^J` separates rows and `%%v` cells;
+/// The cells of a feature control frame, row by row: `^J` (a newline in DWG) separates rows and `%%v` cells;
 /// `{\Fgdt;x}` is GD&T symbol x.
 fn frame_cells(text: &str) -> Vec<Vec<String>> {
     let mut plain = String::new();
@@ -427,7 +427,7 @@ fn frame_cells(text: &str) -> Vec<Vec<String>> {
         rest = tail.get(end + 1..).unwrap_or("");
     }
     plain.push_str(rest);
-    plain.split("^J").map(|row| row.split("%%v").map(|cell| parse::mtext_plain(cell).trim().to_string()).collect()).collect()
+    plain.replace("^J", "\n").split('\n').map(|row| row.split("%%v").map(|cell| parse::mtext_plain(cell).trim().to_string()).collect()).collect()
 }
 
 /// A TOLERANCE: boxes of height twice the text, the first row's left middle at `at`, along `dir`.
@@ -529,5 +529,6 @@ mod tests {
     fn frame_cells_from_gdt_codes() {
         let cells = frame_cells("{\\Fgdt;j}%%v{\\Fgdt;n}0.05{\\Fgdt;m}%%vA^J{\\Fgdt;u}%%v0.1");
         assert_eq!(cells, vec![vec!["⌖", "⌀0.05Ⓜ", "A"], vec!["⏤", "0.1"]]);
+        assert_eq!(frame_cells("A\nB"), vec![vec!["A"], vec!["B"]]);
     }
 }
