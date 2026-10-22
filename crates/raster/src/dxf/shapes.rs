@@ -32,11 +32,13 @@ fn ltypeshp(number: i64) -> Option<Vec<Vec<P>>> {
     })
 }
 
+/// Shapes repeat thousands of times along a line and are tiny at most zooms, so arcs turn 15° per
+/// segment: coarse only for a shape drawn hundreds of pixels across.
 fn arc(centre: P, r: f64, start: f64, sweep: f64) -> Vec<P> {
-    const STEPS: usize = 32;
-    (0..=STEPS)
+    let steps = (sweep.abs() / (PI / 12.0)).ceil().max(1.0) as usize;
+    (0..=steps)
         .map(|i| {
-            let (s, c) = (start + sweep * i as f64 / STEPS as f64).sin_cos();
+            let (s, c) = (start + sweep * i as f64 / steps as f64).sin_cos();
             [centre[0] + r * c, centre[1] + r * s]
         })
         .collect()

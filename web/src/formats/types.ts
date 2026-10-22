@@ -55,6 +55,8 @@ export interface VectorDocument {
   layers: Layer[];
   /** True if some lines have a line weight that draws thicker than a hairline. */
   weighted: boolean;
+  /** True if the drawing is too slow to redraw every frame; the viewer then moves its last render while the view changes. */
+  heavy: boolean;
   /** Draws the whole canvas. `invert` puts the drawing on black instead of white paper; `weights` draws line weights. */
   draw(ctx: CanvasRenderingContext2D, view: View, invert: boolean, weights: boolean): void;
   /** Texts on visible layers containing `query`, ignoring case, in file order. */

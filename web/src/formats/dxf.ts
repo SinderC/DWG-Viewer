@@ -22,6 +22,14 @@ const HAIRLINE_WEIGHT = 25;
 const PX_PER_MM = 96 / 25.4;
 /** Text smaller than this many device pixels is not drawn. */
 const MIN_TEXT_PX = 1.5;
+/** Strokes are split into a TILES × TILES grid over the drawing, so a frame skips what is off screen. */
+const TILES = 8;
+/** Lines at most this many CSS pixels wide are drawn with butt caps and bevel joins, which look the same and are quicker. */
+const THIN_PX = 2;
+/** And by size, under these fractions of the drawing and larger, so tiny paths can be drawn coarse. */
+const SIZE_CLASSES = [1 / 4096, 1 / 512, 1 / 64];
+/** Drawings with more path vertices than this are `heavy`. */
+const HEAVY_VERTICES = 50_000;
 /** Colours lighter (on white) or darker (on black) than this luma are adjusted to stay readable. */
 const MAX_LUMA_ON_WHITE = 170;
 const MIN_LUMA_ON_BLACK = 70;
@@ -109,7 +117,18 @@ interface Stroke {
   dot: boolean;
   /** Line weight in 1/100 mm; 0 for none. */
   weight: number;
+  /** By tile and size class; see `strokes`. */
+  parts: Map<number, Part>;
+}
+
+/** Paths of one stroke style that share a tile and size class. */
+interface Part {
   path: Path2D;
+  /** Each path as a line from its first point to its last, drawn instead when the largest is under a pixel. */
+  coarse: Path2D;
+  /** Bounds of the paths in drawing units: left, top, right, bottom; and the largest path's width or height. */
+  box: [number, number, number, number];
+  size: number;
 }
 
 interface Fill {
@@ -164,13 +183,16 @@ function dashes(doc: DxfDoc): number[][] {
 }
 
 /**
- * Builds one Path2D per layer, colour, width and dash pattern, so a frame is a handful of stroke() calls.
- * Also returns the snap points: line ends, segment midpoints, arc ends and centres.
+ * Builds Path2Ds per layer, colour, width and dash pattern, split by tile and size (see `Part`), so a
+ * frame is one stroke() call per style and visible part. Also returns the snap points: line ends,
+ * segment midpoints, arc ends and centres.
  */
-function strokes(doc: DxfDoc): [Map<number, Map<string, Stroke>>, SnapPoints] {
+function strokes(doc: DxfDoc): [Map<number, Map<string, Stroke>>, SnapPoints, number] {
   const patterns = dashes(doc);
   const byLayer = new Map<number, Map<string, Stroke>>();
-  const pathFor = (layer: number, color: number, width: number, dash: number, weight: number, dot = false) => {
+  const extent = Math.max(doc.width, doc.height);
+  const tile = (v: number, size: number) => Math.min(TILES - 1, Math.max(0, Math.floor((v / size) * TILES)));
+  const partFor = (layer: number, color: number, width: number, dash: number, weight: number, [x0, y0, x1, y1]: Part['box'], dot = false) => {
     let byStyle = byLayer.get(layer);
     if (!byStyle) byLayer.set(layer, (byStyle = new Map()));
     const key = `${color}/${width}/${dash}/${weight}/${dot}`;
@@ -178,9 +200,20 @@ function strokes(doc: DxfDoc): [Map<number, Map<string, Stroke>>, SnapPoints] {
     if (!stroke) {
       const pattern = dot ? [] : patterns[dash];
       const period = pattern.reduce((a, b) => a + b, 0);
-      byStyle.set(key, (stroke = { color, width, dash: pattern, period, dot, weight, path: new Path2D() }));
+      byStyle.set(key, (stroke = { color, width, dash: pattern, period, dot, weight, parts: new Map() }));
     }
-    return stroke.path;
+    const size = Math.max(x1 - x0, y1 - y0);
+    const sizeClass = SIZE_CLASSES.filter((f) => size >= f * extent).length;
+    const at = ((tile((y0 + y1) / 2, doc.height) * TILES + tile((x0 + x1) / 2, doc.width)) * (SIZE_CLASSES.length + 1)) + sizeClass;
+    let part = stroke.parts.get(at);
+    if (!part) {
+      stroke.parts.set(at, (part = { path: new Path2D(), coarse: new Path2D(), box: [x0, y0, x1, y1], size }));
+    } else {
+      const box = part.box;
+      [box[0], box[1], box[2], box[3]] = [Math.min(box[0], x0), Math.min(box[1], y0), Math.max(box[2], x1), Math.max(box[3], y1)];
+      part.size = Math.max(part.size, size);
+    }
+    return part;
   };
 
   const points = doc.pathPoints();
@@ -195,10 +228,17 @@ function strokes(doc: DxfDoc): [Map<number, Map<string, Stroke>>, SnapPoints] {
   let k = 0;
   doc.pathLengths().forEach((n, i) => {
     let dot = true;
-    for (let j = 1; j < n && dot; j++) dot = points[k + 2 * j] === points[k] && points[k + 2 * j + 1] === points[k + 1];
-    const path = pathFor(layers[i], colors[i], widths[i], pathDashes[i], weights[i], dot);
+    const box: Part['box'] = [Infinity, Infinity, -Infinity, -Infinity];
+    for (let j = 0; j < n; j++) {
+      const [x, y] = [points[k + 2 * j], points[k + 2 * j + 1]];
+      [box[0], box[1], box[2], box[3]] = [Math.min(box[0], x), Math.min(box[1], y), Math.max(box[2], x), Math.max(box[3], y)];
+      dot &&= x === points[k] && y === points[k + 1];
+    }
+    const { path, coarse } = partFor(layers[i], colors[i], widths[i], pathDashes[i], weights[i], box, dot);
     path.moveTo(points[k], points[k + 1]);
     for (let j = 1; j < n; j++) path.lineTo(points[k + 2 * j], points[k + 2 * j + 1]);
+    coarse.moveTo(points[k], points[k + 1]);
+    coarse.lineTo(points[k + 2 * n - 2], points[k + 2 * n - 1]);
     for (let j = 0; j < n; j++) {
       const [x, y] = [points[k + 2 * j], points[k + 2 * j + 1]];
       snaps.add(x, y, 'end', layers[i]);
@@ -217,13 +257,18 @@ function strokes(doc: DxfDoc): [Map<number, Map<string, Stroke>>, SnapPoints] {
     const [cx, cy, ux, uy, vx, vy, t0, t1] = arcs.subarray(8 * i, 8 * i + 8);
     const unit = new Path2D();
     unit.ellipse(0, 0, 1, 1, 0, t0, t1, t1 < t0);
-    pathFor(arcLayers[i], color, arcWidths[i], arcDashes[i], arcWeights[i]).addPath(unit, new DOMMatrix([ux, uy, vx, vy, cx, cy]));
+    // The bounds of the whole ellipse.
+    const [rx, ry] = [Math.abs(ux) + Math.abs(vx), Math.abs(uy) + Math.abs(vy)];
+    const part = partFor(arcLayers[i], color, arcWidths[i], arcDashes[i], arcWeights[i], [cx - rx, cy - ry, cx + rx, cy + ry]);
+    const m = new DOMMatrix([ux, uy, vx, vy, cx, cy]);
+    part.path.addPath(unit, m);
+    part.coarse.addPath(unit, m);
     snaps.add(cx, cy, 'centre', arcLayers[i]);
     if (Math.abs(t1 - t0) < 2 * Math.PI - 1e-9) {
       for (const t of [t0, t1]) snaps.add(cx + ux * Math.cos(t) + vx * Math.sin(t), cy + uy * Math.cos(t) + vy * Math.sin(t), 'end', arcLayers[i]);
     }
   });
-  return [byLayer, snaps];
+  return [byLayer, snaps, points.length / 2];
 }
 
 /** One Path2D per fill, its rings as subpaths, in file order. */
@@ -584,7 +629,7 @@ export function vectorDocument(doc: DxfDoc): VectorDocument {
   try {
     pictures = images(doc);
     const areas = fills(doc);
-    const [paths, snaps] = strokes(doc);
+    const [paths, snaps, vertices] = strokes(doc);
     const labels = texts(doc);
     const layerList = layers(doc);
     const page = doc.background();
@@ -599,6 +644,7 @@ export function vectorDocument(doc: DxfDoc): VectorDocument {
       info: infoRows(doc.info()),
       layers: layerList,
       weighted: [...paths.values()].some((byStyle) => [...byStyle.values()].some((s) => s.weight > HAIRLINE_WEIGHT)),
+      heavy: vertices > HEAVY_VERTICES,
       draw(ctx, view, invert, weights) {
         const { scale, x, y } = view;
         const { width, height } = ctx.canvas;
@@ -627,17 +673,24 @@ export function vectorDocument(doc: DxfDoc): VectorDocument {
 
         // Lines are at least one CSS pixel wide at any zoom, hairlines exactly that; with `weights`
         // a line weight above HAIRLINE_WEIGHT is that many millimetres of screen, whatever the zoom.
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
         const dpr = window.devicePixelRatio || 1;
+        const [right, bottom] = [x + width / scale, y + height / scale];
         for (const [layer, byStyle] of paths) {
           if (!layerList[layer].visible) continue;
-          for (const { color, width: lineWidth, dash, period, dot, weight, path } of byStyle.values()) {
+          for (const { color, width: lineWidth, dash, period, dot, weight, parts } of byStyle.values()) {
             const px = weights && weight > HAIRLINE_WEIGHT ? Math.round((weight / 100) * PX_PER_MM) : 1;
+            const w = Math.max(lineWidth, (dot ? MIN_DOT_PX : px * dpr) / scale);
             ctx.strokeStyle = css(color, invert);
-            ctx.lineWidth = Math.max(lineWidth, (dot ? MIN_DOT_PX : px * dpr) / scale);
+            ctx.lineWidth = w;
             ctx.setLineDash(period * scale < MIN_DASH_PX ? [] : dash);
-            ctx.stroke(path);
+            const thin = !dot && w * scale <= THIN_PX * dpr;
+            ctx.lineCap = thin ? 'butt' : 'round';
+            ctx.lineJoin = thin ? 'bevel' : 'round';
+            for (const { path, coarse, box, size } of parts.values()) {
+              if (box[2] + w < x || box[0] - w > right || box[3] + w < y || box[1] - w > bottom) continue;
+              // Under a CSS pixel, a path is hidden under its own line width.
+              ctx.stroke(size * scale < dpr ? coarse : path);
+            }
           }
         }
         ctx.setLineDash([]);

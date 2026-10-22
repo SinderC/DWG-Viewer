@@ -14,7 +14,7 @@ pub(crate) mod dim;
 pub(crate) mod parse;
 pub(crate) mod shapes;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::f64::consts::TAU;
 
 use acadrust::entities::solid3d::AcisData;
@@ -671,6 +671,34 @@ impl<'a> World<'a> {
         for t in self.texts.iter_mut().skip(start) {
             t.mask = Some((color, margin * m.length_scale()));
         }
+    }
+
+    /// Drops line segments drawn before with the same pen, splitting paths where they go: plot files
+    /// fill thick traces with overlapping strokes that repeat shared edges. Ends match to 1/1000 unit.
+    pub(crate) fn drop_repeated_segments(&mut self) {
+        let key = |p: P| [(p[0] * 1e3).round() as i64, (p[1] * 1e3).round() as i64];
+        let mut seen = HashSet::new();
+        let mut kept = Vec::with_capacity(self.paths.len());
+        for path in std::mem::take(&mut self.paths) {
+            let pen = (path.color, path.width.to_bits(), path.dash, path.layer, path.weight);
+            let part = |points| Path { points, ..path };
+            let mut run: Vec<P> = Vec::new();
+            for w in path.points.windows(2) {
+                let (a, b) = (key(w[0]), key(w[1]));
+                if seen.insert((pen, a.min(b), a.max(b))) {
+                    if run.is_empty() {
+                        run.push(w[0]);
+                    }
+                    run.push(w[1]);
+                } else if !run.is_empty() {
+                    kept.push(part(std::mem::take(&mut run)));
+                }
+            }
+            if !run.is_empty() {
+                kept.push(part(run));
+            }
+        }
+        self.paths = kept;
     }
 
     pub(crate) fn finish(mut self, units: &'static str, mut info: Vec<(String, String)>) -> Result<Drawing, String> {

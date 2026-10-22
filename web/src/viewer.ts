@@ -24,6 +24,9 @@ const TOUCH_TAP_SLOP = 10;
 const RUBBER = 0.55;
 /** Frames slower than this make view changes jump instead of animate. */
 const SLOW_FRAME_MS = 25;
+/** A heavy drawing is redrawn sharp this long after the view stops moving; until then its last render is moved,
+ * over a render of the whole drawing for what that does not cover. */
+const SETTLE_MS = 150;
 
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
 
@@ -45,6 +48,12 @@ export function drawDocument(ctx: CanvasRenderingContext2D, doc: DrawingDocument
   ctx.fillStyle = paper.tint;
   ctx.fillRect(0, 0, width, height);
   ctx.globalCompositeOperation = 'source-over';
+}
+
+/** A render of the canvas at `view`. */
+interface Snapshot {
+  canvas: HTMLCanvasElement;
+  view: View;
 }
 
 /** Advances an animation by `dt` seconds; returns false once it has finished. */
@@ -103,6 +112,12 @@ export class Viewer {
   private springs: [Spring, Spring, Spring] | null = null;
   private lastTick = 0;
   private lastFrameMs = 0;
+  /** A heavy drawing's last full render, and its render at the fitted view, without the grid; null when out of date. */
+  private snapshot: Snapshot | null = null;
+  private overview: Snapshot | null = null;
+  private readonly snapshotCanvas = document.createElement('canvas');
+  private readonly overviewCanvas = document.createElement('canvas');
+  private settleTimer = 0;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -126,6 +141,7 @@ export class Viewer {
   setDocument(doc: DrawingDocument | null): void {
     this.doc?.free();
     this.doc = doc;
+    this.snapshot = this.overview = null;
     this.stop();
     // A drag or pinch on the previous document does not carry over.
     this.pointers.clear();
@@ -325,7 +341,7 @@ export class Viewer {
   private start(motion: Motion): void {
     if (!this.motion) this.lastTick = performance.now();
     this.motion = motion;
-    this.redraw();
+    this.repaint();
   }
 
   /** Stops any animation or momentum where it is: the user has taken over. */
@@ -337,10 +353,17 @@ export class Viewer {
   private setView(view: View): void {
     this.view = view;
     this.onViewChange(view);
-    this.redraw();
+    this.repaint();
   }
 
+  /** Repaints everything in the next frame, after a change to what the drawing looks like. */
   redraw(): void {
+    this.snapshot = this.overview = null;
+    this.repaint();
+  }
+
+  /** Repaints everything in the next frame, for a new view of the same picture. */
+  private repaint(): void {
     this.docDirty = true;
     this.redrawOverlay();
   }
@@ -400,7 +423,7 @@ export class Viewer {
     } finally {
       this.frame = 0;
     }
-    if (this.motion) this.redraw();
+    if (this.motion) this.repaint();
   }
 
   private paintFrame(now: number): void {
@@ -415,17 +438,55 @@ export class Viewer {
     if (this.docDirty) {
       this.docDirty = false;
       const started = performance.now();
-      if (this.doc && (this.doc.kind === 'vector' || (width > 0 && height > 0))) {
+      const heavy = this.doc?.kind === 'vector' && this.doc.heavy;
+      if (this.snapshot && this.overview) {
+        this.paintSnapshots(this.overview, this.snapshot);
+        clearTimeout(this.settleTimer);
+        this.settleTimer = window.setTimeout(() => this.redraw(), SETTLE_MS);
+      } else if (this.doc && (this.doc.kind === 'vector' || (width > 0 && height > 0))) {
         drawDocument(this.ctx, this.doc, this.view, width, height, this.paper, this.weights);
-        if (this.grid && this.doc.kind === 'vector') drawGrid(this.ctx, this.view, this.doc.origin, this.paper.invert);
+        if (heavy) {
+          this.snapshot = this.capture(this.snapshotCanvas, this.view);
+          const fit = this.fitView();
+          const fitted = fit.scale === this.view.scale && fit.x === this.view.x && fit.y === this.view.y;
+          this.overview ??= fitted ? this.capture(this.overviewCanvas, this.view) : this.capture(this.overviewCanvas, fit, this.doc);
+        }
       } else {
         this.ctx.clearRect(0, 0, width, height);
       }
-      this.lastFrameMs = performance.now() - started;
+      if (this.grid && this.doc?.kind === 'vector') drawGrid(this.ctx, this.view, this.doc.origin, this.paper.invert);
+      // A heavy drawing animates with its snapshot, so its full renders don't count.
+      if (!heavy || this.snapshot?.view !== this.view) this.lastFrameMs = performance.now() - started;
     }
     this.overlayCtx.setTransform(1, 0, 0, 1, 0, 0);
     this.overlayCtx.clearRect(0, 0, width, height);
     if (this.doc) this.paintOverlay(this.overlayCtx, this.view);
+  }
+
+  /** Copies the canvas into `target` as the render at `view`, or with `doc` renders `view` there. */
+  private capture(target: HTMLCanvasElement, view: View, doc?: DrawingDocument): Snapshot {
+    const { width, height } = this.canvas;
+    target.width = width;
+    target.height = height;
+    const ctx = target.getContext('2d')!;
+    if (doc) drawDocument(ctx, doc, view, width, height, this.paper, this.weights);
+    else ctx.drawImage(this.canvas, 0, 0);
+    return { canvas: target, view };
+  }
+
+  /** Draws the snapshots moved and scaled to the current view, in order, on blank paper where none reaches. */
+  private paintSnapshots(...snapshots: Snapshot[]): void {
+    const { scale, x, y } = this.view;
+    const paper = this.paper;
+    this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+    this.ctx.fillStyle = paper.tint ?? (paper.invert ? '#000' : '#fff');
+    this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+    for (const { canvas, view } of snapshots) {
+      const k = scale / view.scale;
+      this.ctx.setTransform(k, 0, 0, k, (view.x - x) * scale, (view.y - y) * scale);
+      this.ctx.drawImage(canvas, 0, 0);
+    }
+    this.ctx.setTransform(1, 0, 0, 1, 0, 0);
   }
 
   /** Matches the canvas' backing store to its CSS size in device pixels. Returns true if it changed. */
