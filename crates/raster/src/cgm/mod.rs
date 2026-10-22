@@ -421,7 +421,11 @@ impl Decoder {
             // METAFILE DEFAULTS REPLACEMENT: elements that change the picture defaults.
             12 => {
                 for c in read::commands(r.rest()) {
-                    self.command(&c?, true)?;
+                    let c = c?;
+                    // Nested replacements are not meaningful and would recurse without limit.
+                    if (c.class, c.id) != (1, 12) {
+                        self.command(&c, true)?;
+                    }
                 }
             }
             13 => {
@@ -505,6 +509,10 @@ impl Decoder {
                 let mut k = start;
                 while !r.is_empty() {
                     let c = st.rgb(r.color_direct()?);
+                    // Indexes beyond any real colour table would allocate gigabytes.
+                    if k > 0xFFFF {
+                        break;
+                    }
                     if st.table.len() <= k {
                         st.table.resize(k + 1, FOREGROUND);
                     }
@@ -538,7 +546,7 @@ impl Decoder {
     }
 
     fn pen(&mut self, color: Colour, width: f64) -> Pen {
-        Pen { color: self.st.resolve(color), layer: self.layer(), width, dash: 0 }
+        Pen { color: self.st.resolve(color), layer: self.layer(), width, dash: 0, weight: 0 }
     }
 
     fn line_pen(&mut self) -> Pen {
@@ -557,7 +565,7 @@ impl Decoder {
         let Some(pattern) = dash_pattern(line_type) else {
             return match edge {
                 Edge::Line(points) => self.world.path(points, &m, pen),
-                Edge::Curve { c, u, v, t0, t1 } => self.world.arc(Arc { centre: c, u, v, t0, t1, color: pen.color, width: pen.width, dash: pen.dash, layer: pen.layer }, &m),
+                Edge::Curve { c, u, v, t0, t1 } => self.world.arc(Arc { centre: c, u, v, t0, t1, color: pen.color, width: pen.width, dash: pen.dash, layer: pen.layer, weight: 0 }, &m),
             };
         };
         // The dash unit grows with the line width so thick dashes stay longer than they are wide.
@@ -724,7 +732,7 @@ impl Decoder {
         let font = self.fonts.get((st.font - 1).max(0) as usize).map_or(FONT_SANS, |name| font_style(name));
         let pen = self.pen(self.st.text_color, 0.0);
         if !vertical {
-            return self.world.text_frame(pos, x, upv, (h, v), chars.into_iter().collect(), TextStyle { fit, font }, &m, pen);
+            return self.world.text_frame(pos, x, upv, (h, v), chars.into_iter().collect(), TextStyle { fit, font, ..TextStyle::default() }, &m, pen);
         }
         // Distance from the anchor up to the top of the column, which runs from the first
         // character's top to the last one's baseline.
@@ -736,7 +744,7 @@ impl Decoder {
         };
         for (i, c) in chars.into_iter().enumerate() {
             let at = top - i as f64 * pitch;
-            self.world.text_frame([pos[0] + up[0] * at, pos[1] + up[1] * at], x, upv, (h, 3), c.to_string(), TextStyle { fit: 0.0, font }, &m, pen);
+            self.world.text_frame([pos[0] + up[0] * at, pos[1] + up[1] * at], x, upv, (h, 3), c.to_string(), TextStyle { font, ..TextStyle::default() }, &m, pen);
         }
     }
 
@@ -756,7 +764,7 @@ impl Decoder {
             3 => [plus, cross].concat(),
             5 => cross.to_vec(),
             4 => {
-                let circle = Arc { centre: p, u: [r, 0.0], v: [0.0, r], t0: 0.0, t1: TAU, color: pen.color, width: 0.0, dash: 0, layer: pen.layer };
+                let circle = Arc { centre: p, u: [r, 0.0], v: [0.0, r], t0: 0.0, t1: TAU, color: pen.color, width: 0.0, dash: 0, layer: pen.layer, weight: 0 };
                 return self.world.arc(circle, &m);
             }
             // A dot, the smallest visible mark: a small filled disc.
@@ -861,7 +869,8 @@ impl Decoder {
             return Err(format!("{bits}-bit cell colours"));
         }
         let int_bits = st.prec.int * 8;
-        let mut b = Bits::new(r.rest());
+        let rest = r.rest();
+        let mut b = Bits::new(rest);
         // At a local precision the colour value extent does not apply: values span the full range.
         let local_max = ((1u64 << bits) - 1) as f64;
         let rescale = |v: u32, k: usize| {
@@ -879,7 +888,8 @@ impl Decoder {
             })
         };
         let (nx, ny) = (nx as usize, ny as usize);
-        let mut data = Vec::with_capacity(nx * ny);
+        // Reserve no more than the data can fill (a cell takes at least a bit); runs grow it as needed.
+        let mut data = Vec::with_capacity((nx * ny).min(rest.len() * 8));
         for row in 1..=ny {
             while data.len() < row * nx {
                 let count = if packed { 1 } else { b.read(int_bits)? as usize };
@@ -972,7 +982,7 @@ impl Decoder {
         let (bottom, top) = (corners.iter().map(|c| c[1]).fold(f64::INFINITY, f64::min), corners.iter().map(|c| c[1]).fold(f64::NEG_INFINITY, f64::max));
         // No coarser than a source cell, and fine enough that the slanted edges look straight.
         let cell = (row[0].hypot(row[1]) / w as f64).min(col[0].hypot(col[1]) / h as f64);
-        let px = cell.min((right - left).max(top - bottom) / RESAMPLE_SIDE).max((right - left) * (top - bottom) / MAX_RESAMPLED as f64).max(1e-12);
+        let px = cell.min((right - left).max(top - bottom) / RESAMPLE_SIDE).max(((right - left) * (top - bottom) / MAX_RESAMPLED as f64).sqrt()).max(1e-12);
         let (ow, oh) = (((right - left) / px).ceil().max(1.0) as u32, ((top - bottom) / px).ceil().max(1.0) as u32);
         // The source cell under the centre of output pixel (i, j), if any.
         let source = |i: u32, j: u32| {
@@ -1061,6 +1071,9 @@ fn add(a: P, b: P) -> P {
 
 /// Upper bound on a resampled image's pixels.
 const MAX_RESAMPLED: u64 = 16_000_000;
+/// Most pattern repeats dashed along one path, and most hatch lines per angle.
+const MAX_DASHES: f64 = 10_000.0;
+const MAX_HATCH_LINES: f64 = 20_000.0;
 
 /// A boundary piece in VDC: a polyline or the arc `c + u·cos t + v·sin t` from `t0` to `t1`.
 #[derive(Clone)]
@@ -1099,6 +1112,12 @@ fn dash_pattern(line_type: i64) -> Option<&'static [f64]> {
 /// The dashes of `points` in `pattern` (alternating on and off lengths, times `unit`), the pattern
 /// running on across vertices.
 fn dash(points: &[P], pattern: &[f64], unit: f64) -> Vec<Vec<P>> {
+    let period = pattern.iter().sum::<f64>() * unit;
+    let total: f64 = points.windows(2).map(|s| sub(s[1], s[0])[0].hypot(sub(s[1], s[0])[1])).sum();
+    // Patterns too fine (or degenerate) to draw dash by dash are drawn solid.
+    if !(period > 0.0 && total / period <= MAX_DASHES) {
+        return vec![points.to_vec()];
+    }
     let mut out = Vec::new();
     let (mut k, mut left) = (0, pattern[0] * unit);
     let mut current: Vec<P> = points.iter().take(1).copied().collect();
@@ -1153,10 +1172,11 @@ fn hatch(rings: &[Vec<P>], index: i64, spacing: f64) -> Vec<[P; 2]> {
         let all = rings.iter().flatten();
         let lo = all.clone().map(|&p| across(p)).fold(f64::INFINITY, f64::min);
         let hi = all.map(|&p| across(p)).fold(f64::NEG_INFINITY, f64::max);
-        if !lo.is_finite() {
+        let (k0, k1) = ((lo / spacing).ceil(), (hi / spacing).floor());
+        if !(k1 - k0 <= MAX_HATCH_LINES) {
             continue;
         }
-        for k in (lo / spacing).ceil() as i64..=(hi / spacing).floor() as i64 {
+        for k in k0 as i64..=k1 as i64 {
             let offset = k as f64 * spacing;
             let mut hits: Vec<f64> = Vec::new();
             for ring in rings {

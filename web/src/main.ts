@@ -4,7 +4,7 @@ import { dwf } from './formats/dwf';
 import { dwg, dxf } from './formats/dxf';
 import { hpgl } from './formats/hpgl';
 import { tiff } from './formats/tiff';
-import type { DrawingDocument, FormatPlugin, Layer, TextHit, View } from './formats/types';
+import type { DrawingDocument, FormatPlugin, Layer, SnapPoint, TextHit, View } from './formats/types';
 import { Minimap } from './minimap';
 import { PAPERS, Viewer } from './viewer';
 
@@ -42,40 +42,94 @@ $('formats').replaceChildren(
 );
 
 const measureButton = $('measure');
+const measureBar = $('measure-bar');
+const measureKeep = $('measure-keep');
+const toolButtons = { distance: $('measure-distance'), angle: $('measure-angle') };
 
-/** Measure tool: first and second point in drawing coordinates, and the pointer while placing the second. */
-const measure = { on: false, a: null as Point | null, b: null as Point | null, hover: null as Point | null };
 type Point = { x: number; y: number };
+type Tool = 'distance' | 'angle';
+/** Points in drawing coordinates: two for a distance; arm, vertex and arm for an angle. */
+type Measurement = { kind: Tool; points: Point[] };
+const POINTS: Record<Tool, number> = { distance: 2, angle: 3 };
+
+/**
+ * Measure tool: the tool in use, the points placed so far, the pointer while placing the next one and
+ * the drawing point it snapped to. With `keep`, finished measurements go to `kept` and stay on screen.
+ */
+const measure = {
+  tool: null as Tool | null,
+  keep: false,
+  kept: [] as Measurement[],
+  points: [] as Point[],
+  hover: null as Point | null,
+  snapped: null as SnapPoint | null,
+};
 
 const ACCENT = '#0a84ff';
+/** Pointer distance, in CSS pixels, within which a drawing point is snapped to. */
+const SNAP_PX = 10;
+/** Lines within this many degrees of horizontal or vertical are straightened. */
+const AXIS_SNAP_DEG = 4;
+/** Radius of the arc marking an angle, in CSS pixels. */
+const ANGLE_ARC_PX = 28;
 
 function paintOverlay(ctx: CanvasRenderingContext2D, view: View): void {
   paintHits(ctx, view);
-  const { a } = measure;
-  const b = measure.b ?? measure.hover;
-  if (!current || !a) return;
+  if (!current) return;
   const dpr = window.devicePixelRatio || 1;
   const screen = (p: Point): [number, number] => [(p.x - view.x) * view.scale, (p.y - view.y) * view.scale];
-  const [ax, ay] = screen(a);
+  const live = measure.tool && { kind: measure.tool, points: measure.hover ? [...measure.points, measure.hover] : measure.points };
+  for (const m of live ? [...measure.kept, live] : measure.kept) paintMeasurement(ctx, current.doc, m.kind, m.points.map(screen), m.points, dpr);
+  if (measure.tool && measure.snapped) snapMarker(ctx, measure.snapped.kind, ...screen(measure.snapped), dpr);
+}
+
+/** Draws a measurement, finished or in progress, from its points on screen (`s`) and in the drawing (`p`). */
+function paintMeasurement(ctx: CanvasRenderingContext2D, doc: DrawingDocument, kind: Tool, s: [number, number][], p: Point[], dpr: number): void {
+  if (!s.length) return;
   ctx.lineWidth = 2 * dpr;
   ctx.strokeStyle = ACCENT;
-  ctx.fillStyle = '#fff';
-  if (b) {
-    const [bx, by] = screen(b);
+  ctx.beginPath();
+  s.forEach(([x, y]) => ctx.lineTo(x, y));
+  ctx.stroke();
+  if (kind === 'angle' && s.length === 3) {
+    // The arc sweeps the inner angle, from arm a to arm c about vertex b.
+    const [[ax, ay], [bx, by], [cx, cy]] = s;
+    const [ta, tc] = [Math.atan2(ay - by, ax - bx), Math.atan2(cy - by, cx - bx)];
+    const sweep = Math.atan2(Math.sin(tc - ta), Math.cos(tc - ta));
+    const r = ANGLE_ARC_PX * dpr;
     ctx.beginPath();
-    ctx.moveTo(ax, ay);
-    ctx.lineTo(bx, by);
+    ctx.arc(bx, by, r, ta, ta + sweep, sweep < 0);
     ctx.stroke();
-    dot(ctx, bx, by, dpr);
-    label(ctx, distanceText(current.doc, a, b), (ax + bx) / 2, (ay + by) / 2, dpr);
+    const mid = ta + sweep / 2;
+    label(ctx, `${number((Math.abs(sweep) * 180) / Math.PI, 4)}°`, bx + Math.cos(mid) * (r + 24 * dpr), by + Math.sin(mid) * (r + 24 * dpr), dpr);
+  } else if (kind === 'distance' && s.length === 2) {
+    label(ctx, distanceText(doc, p[0], p[1]), (s[0][0] + s[1][0]) / 2, (s[0][1] + s[1][1]) / 2, dpr);
   }
-  dot(ctx, ax, ay, dpr);
+  ctx.fillStyle = '#fff';
+  for (const [x, y] of s) dot(ctx, x, y, dpr);
 }
 
 function dot(ctx: CanvasRenderingContext2D, x: number, y: number, dpr: number): void {
   ctx.beginPath();
   ctx.arc(x, y, 4 * dpr, 0, 2 * Math.PI);
   ctx.fill();
+  ctx.stroke();
+}
+
+/** The kind of a snapped point, as AutoCAD marks it: a square for an end, a triangle for a midpoint, a circle for a centre. */
+function snapMarker(ctx: CanvasRenderingContext2D, kind: SnapPoint['kind'], x: number, y: number, dpr: number): void {
+  const r = 7 * dpr;
+  ctx.lineWidth = 2 * dpr;
+  ctx.strokeStyle = ACCENT;
+  ctx.beginPath();
+  if (kind === 'end') ctx.rect(x - r, y - r, 2 * r, 2 * r);
+  else if (kind === 'centre') ctx.arc(x, y, r, 0, 2 * Math.PI);
+  else {
+    ctx.moveTo(x, y - r);
+    ctx.lineTo(x + r, y + r * 0.8);
+    ctx.lineTo(x - r, y + r * 0.8);
+    ctx.closePath();
+  }
   ctx.stroke();
 }
 
@@ -105,11 +159,46 @@ function distanceText(doc: DrawingDocument, a: Point, b: Point): string {
   return doc.dpi ? `${px} · ${number((length / doc.dpi) * 25.4, 4)} mm · ${angle}` : `${px} · ${angle}`;
 }
 
-function setMeasuring(on: boolean): void {
-  measure.on = on;
-  measure.a = measure.b = measure.hover = null;
-  measureButton.setAttribute('aria-pressed', String(on));
-  canvas.classList.toggle('measuring', on);
+/**
+ * The point to place for pointer position `p` (with `pixel`, a CSS pixel in drawing units): a drawing point
+ * near it, or else on the horizontal or vertical through the last point placed if the line is nearly so.
+ * Nothing snaps while Shift is held.
+ */
+function snap(p: Point, pixel: number, free: boolean): { point: Point; snapped: SnapPoint | null } {
+  const doc = current?.doc;
+  if (free || !doc) return { point: p, snapped: null };
+  const snapped = doc.kind === 'vector' ? doc.snap(p.x, p.y, SNAP_PX * pixel) : null;
+  if (snapped) return { point: snapped, snapped };
+  const last = measure.points.at(-1);
+  if (!last) return { point: p, snapped: null };
+  const angle = (Math.abs(Math.atan2(p.y - last.y, p.x - last.x)) * 180) / Math.PI;
+  const off = Math.min(angle, Math.abs(angle - 90), 180 - angle);
+  if (off > AXIS_SNAP_DEG) return { point: p, snapped: null };
+  const horizontal = off === Math.min(angle, 180 - angle);
+  return { point: horizontal ? { x: p.x, y: last.y } : { x: last.x, y: p.y }, snapped: null };
+}
+
+/** Starts measuring with `tool`, or stops with null. Kept measurements stay either way. */
+function setTool(tool: Tool | null): void {
+  measure.tool = tool;
+  measure.points = [];
+  measure.hover = measure.snapped = null;
+  measureButton.setAttribute('aria-pressed', String(!!tool));
+  for (const [kind, button] of Object.entries(toolButtons)) button.setAttribute('aria-pressed', String(kind === tool));
+  measureBar.classList.toggle('open', !!tool);
+  measureBar.inert = !tool;
+  canvas.classList.toggle('measuring', !!tool);
+  viewer.redrawOverlay();
+}
+
+function setKeep(keep: boolean): void {
+  measure.keep = keep;
+  measureKeep.setAttribute('aria-pressed', String(keep));
+  if (!keep) clearMeasurements();
+}
+
+function clearMeasurements(): void {
+  measure.kept = [];
   viewer.redrawOverlay();
 }
 
@@ -137,20 +226,20 @@ function paintHits(ctx: CanvasRenderingContext2D, view: View): void {
   });
 }
 
-function runFind(): void {
+/** Searches again; `go` moves to match `index`, otherwise only the counter and highlights update. */
+function runFind(index = 0, go = true): void {
   const doc = current?.doc;
   find.hits = doc?.kind === 'vector' ? doc.findText(findInput.value.trim()) : [];
-  find.index = 0;
-  showHit();
+  showHit(index, go);
 }
 
-/** Moves to match `index` (wrapping around) and updates the counter. */
-function showHit(index = find.index): void {
+/** Moves to match `index` (wrapping around), unless not `go`, and updates the counter. */
+function showHit(index = find.index, go = true): void {
   const n = find.hits.length;
   find.index = n ? (index + n) % n : 0;
   findCount.textContent = !findInput.value.trim() ? '' : n ? `${find.index + 1} of ${n}` : 'No match';
   const hit = find.hits[find.index];
-  if (hit) {
+  if (hit && go) {
     const xs = hit.corners.map((c) => c[0]);
     const ys = hit.corners.map((c) => c[1]);
     const [x, y] = [Math.min(...xs), Math.min(...ys)];
@@ -174,7 +263,7 @@ function toggleFind(open = !findBar.classList.contains('open')): void {
 }
 
 findButton.addEventListener('click', () => toggleFind());
-findInput.addEventListener('input', runFind);
+findInput.addEventListener('input', () => runFind());
 findInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') showHit(find.index + (e.shiftKey ? -1 : 1));
   else if (e.key === 'Escape') toggleFind(false);
@@ -190,6 +279,7 @@ const viewer = new Viewer(canvas, $<HTMLCanvasElement>('overlay'), paintOverlay,
   const zoom = viewer.document?.kind === 'vector' ? viewer.fitRatio() : view.scale;
   zoomLabel.textContent = `${Math.round(zoom * 100)}%`;
   minimap.update();
+  hover();
 });
 const minimapEl = $('minimap');
 const minimap = new Minimap(minimapEl, minimapEl.querySelector('canvas')!, viewer);
@@ -328,6 +418,7 @@ function syncLayers(): void {
   layerCount.textContent = `${on} of ${layerRows.length} shown`;
   viewer.redraw();
   minimap.invalidate();
+  if (findBar.classList.contains('open')) runFind(find.index, false);
 }
 
 function filterLayers(): void {
@@ -356,6 +447,8 @@ function showError(name: string, err: unknown): void {
 function showPage(file: OpenFile, page: number): void {
   try {
     const doc = file.plugin.open(file.bytes, page);
+    // The viewer owns (and frees) the document from here, so a failure below cannot leak it.
+    viewer.setDocument(doc);
     current = { ...file, page, pageCount: doc.pageCount, info: fileInfo(file, doc, page), formatInfo: doc.info, doc };
     title.textContent = title.title = file.name;
     document.title = `${file.name} – Open Drawing Viewer`;
@@ -367,13 +460,15 @@ function showPage(file: OpenFile, page: number): void {
     if (layersButton.hidden) toggleLayersPanel(false);
     showLayers(layers);
     syncLayers();
-    measure.a = measure.b = measure.hover = null;
+    measure.points = [];
+    measure.hover = measure.snapped = null;
+    measure.kept = [];
     findButton.hidden = gridButton.hidden = doc.kind !== 'vector';
+    weightsButton.hidden = doc.kind !== 'vector' || !doc.weighted;
     if (findButton.hidden) toggleFind(false);
     pageLabel.textContent = `${page + 1} / ${doc.pageCount}`;
     start.hidden = true;
     document.body.classList.add('has-doc');
-    viewer.setDocument(doc);
     minimap.invalidate();
     if (findBar.classList.contains('open')) runFind();
     updateToolbarEdges();
@@ -390,13 +485,18 @@ function turnPage(delta: number): void {
 /** Files above this size get a progress toast; decoding blocks the page, so it must be painted first. */
 const SLOW_FILE = 1 << 20;
 
+/** Bumped by each openFile, so a slow load finishing after a later one does not replace it. */
+let loading = 0;
+
 async function openFile(file: File): Promise<void> {
+  const id = ++loading;
   try {
     if (file.size > SLOW_FILE) {
       toast(`Opening ${file.name}…`, { ms: 0 });
       await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
     }
     const bytes = new Uint8Array(await file.arrayBuffer());
+    if (id !== loading) return;
     const plugin = findPlugin(file.name, bytes);
     if (!plugin) throw new Error('Unsupported file format');
     showPage({ name: file.name, bytes, plugin }, 0);
@@ -429,24 +529,60 @@ function showCoords(e: PointerEvent): void {
   coords.hidden = false;
 }
 
+/** The pointer's last position on the canvas and Shift, so the point being placed follows view changes and Shift. */
+let pointer: { clientX: number; clientY: number; shiftKey: boolean } | null = null;
+
+/** Moves the point being placed to the pointer, snapped unless Shift is down. */
+function hover(): void {
+  if (!measure.tool || !pointer) return;
+  // A finished measurement that is not kept stays on screen until the next click.
+  if (measure.points.length === POINTS[measure.tool]) return;
+  const p = viewer.toDrawing(pointer);
+  ({ point: measure.hover, snapped: measure.snapped } = snap(p, p.pixel, pointer.shiftKey));
+  viewer.redrawOverlay();
+}
+
 canvas.addEventListener('pointermove', (e) => {
   showCoords(e);
-  if (measure.on && measure.a && !measure.b) {
-    measure.hover = viewer.toDrawing(e);
-    viewer.redrawOverlay();
-  }
+  pointer = { clientX: e.clientX, clientY: e.clientY, shiftKey: e.shiftKey };
+  hover();
 });
+canvas.addEventListener('pointerleave', () => {
+  coords.hidden = true;
+  pointer = null;
+  measure.hover = measure.snapped = null;
+  viewer.redrawOverlay();
+});
+for (const type of ['keydown', 'keyup'] as const) {
+  document.addEventListener(type, (e) => {
+    if (e.key === 'Shift' && pointer) {
+      pointer.shiftKey = type === 'keydown';
+      hover();
+    }
+  });
+}
 viewer.onTap = (e) => {
-  if (!measure.on) return;
+  const tool = measure.tool;
+  if (!tool) return;
+  if (measure.points.length === POINTS[tool]) measure.points = [];
   const p = viewer.toDrawing(e);
-  if (measure.a && !measure.b) measure.b = p;
-  else [measure.a, measure.b, measure.hover] = [p, null, null];
+  measure.points.push(snap(p, p.pixel, e.shiftKey).point);
+  measure.hover = measure.snapped = null;
+  if (measure.points.length === POINTS[tool] && measure.keep) {
+    measure.kept.push({ kind: tool, points: measure.points });
+    measure.points = [];
+  }
   viewer.redrawOverlay();
 };
-measureButton.addEventListener('click', () => setMeasuring(!measure.on));
+measureButton.addEventListener('click', () => setTool(measure.tool ? null : 'distance'));
+toolButtons.distance.addEventListener('click', () => setTool('distance'));
+toolButtons.angle.addEventListener('click', () => setTool('angle'));
+measureKeep.addEventListener('click', () => setKeep(!measure.keep));
+$('measure-clear').addEventListener('click', clearMeasurements);
+$('measure-close').addEventListener('click', () => setTool(null));
 // While measuring, a double click is two points, not a request to fit.
 canvas.addEventListener('dblclick', () => {
-  if (!measure.on) viewer.fit();
+  if (!measure.tool) viewer.fit();
 });
 
 /** Saves the view as shown, measurements included, as a PNG next to the file's name. */
@@ -470,7 +606,6 @@ function exportView(): void {
 }
 
 $('export').addEventListener('click', exportView);
-canvas.addEventListener('pointerleave', () => (coords.hidden = true));
 
 fileInput.addEventListener('change', () => {
   const file = fileInput.files?.[0];
@@ -512,6 +647,10 @@ const gridButton = $<HTMLButtonElement>('grid');
 const toggleGrid = () => gridButton.setAttribute('aria-pressed', String(viewer.toggleGrid()));
 gridButton.addEventListener('click', toggleGrid);
 
+const weightsButton = $<HTMLButtonElement>('weights');
+const toggleWeights = () => weightsButton.setAttribute('aria-pressed', String(viewer.toggleWeights()));
+weightsButton.addEventListener('click', toggleWeights);
+
 const mac = /Mac|iPhone|iPad/.test(navigator.userAgent);
 
 interface Shortcut {
@@ -534,13 +673,15 @@ const shortcuts: Shortcut[] = [
   { keys: ['1'], label: 'Actual pixels', run: () => viewer.actualSize(), when: () => !!current && !actualSize.hidden, button: 'actual' },
   { keys: ['i'], label: 'Paper: dark blue, white, black', run: nextPaper, button: 'invert' },
   { keys: ['g'], label: 'Show or hide the grid', run: toggleGrid, when: () => !gridButton.hidden, button: 'grid' },
+  { keys: ['w'], label: 'Show or hide line weights', run: toggleWeights, when: () => !weightsButton.hidden, button: 'weights' },
   { keys: ['l'], label: 'Show or hide layers', run: () => toggleLayersPanel(), when: () => !layersButton.hidden, button: 'layers' },
   { keys: ['ArrowLeft', 'PageUp'], label: 'Previous page', run: () => turnPage(-1), button: 'prev-page' },
   { keys: ['ArrowRight', 'PageDown'], label: 'Next page', run: () => turnPage(1), button: 'next-page' },
   { keys: ['Mod+s'], label: 'Save view as PNG', run: exportView, button: 'export' },
   { keys: ['Mod+f'], label: 'Find text', run: () => toggleFind(true), when: () => !findButton.hidden, button: 'find' },
-  { keys: ['m'], label: 'Measure distance', run: () => setMeasuring(!measure.on), button: 'measure' },
-  { keys: ['Escape'], label: 'Stop measuring', run: () => setMeasuring(false), when: () => measure.on },
+  { keys: ['m'], label: 'Measure distance', run: () => setTool(measure.tool === 'distance' ? null : 'distance'), button: 'measure' },
+  { keys: ['a'], label: 'Measure angle', run: () => setTool(measure.tool === 'angle' ? null : 'angle'), button: 'measure-angle' },
+  { keys: ['Escape'], label: 'Stop measuring', run: () => setTool(null), when: () => !!measure.tool },
   { keys: ['?'], label: 'Keyboard shortcuts', run: () => keysDialog.showModal(), when: always, button: 'keys' },
 ];
 

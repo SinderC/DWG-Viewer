@@ -40,6 +40,9 @@ fn node(e: &BytesStart) -> Result<Node, String> {
     Ok(Node { name, attrs, children: Vec::new() })
 }
 
+/// Deepest element nesting accepted; the tree is walked recursively, within the wasm stack.
+const MAX_DEPTH: usize = 256;
+
 /// Parses `data` (UTF-8, optionally with a BOM) into its root element.
 pub(super) fn parse(data: &[u8]) -> Result<Node, String> {
     let text = std::str::from_utf8(data.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(data)).map_err(|_| "XML part is not UTF-8")?;
@@ -48,6 +51,7 @@ pub(super) fn parse(data: &[u8]) -> Result<Node, String> {
     let mut stack: Vec<Node> = vec![Node { name: String::new(), attrs: Vec::new(), children: Vec::new() }];
     loop {
         match reader.read_event().map_err(bad)? {
+            Event::Start(_) if stack.len() > MAX_DEPTH => return Err("XML nested too deeply".into()),
             Event::Start(e) => stack.push(node(&e)?),
             Event::Empty(e) => {
                 let n = node(&e)?;

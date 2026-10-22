@@ -220,6 +220,17 @@ impl DxfDoc {
         self.drawing.arcs.iter().map(|a| a.dash).collect()
     }
 
+    /// Line weight of each path in 1/100 mm; 0 = none.
+    #[wasm_bindgen(js_name = pathWeights)]
+    pub fn path_weights(&self) -> Vec<u8> {
+        self.drawing.paths.iter().map(|p| p.weight).collect()
+    }
+
+    #[wasm_bindgen(js_name = arcWeights)]
+    pub fn arc_weights(&self) -> Vec<u8> {
+        self.drawing.arcs.iter().map(|a| a.weight).collect()
+    }
+
     /// All dash patterns' on and off lengths, in drawing units, one pattern after another.
     #[wasm_bindgen(js_name = dashLengths)]
     pub fn dash_lengths(&self) -> Vec<f64> {
@@ -264,6 +275,26 @@ impl DxfDoc {
     #[wasm_bindgen(js_name = fillEvenOdd)]
     pub fn fill_even_odd(&self) -> Vec<u8> {
         self.drawing.fills.iter().map(|f| f.even_odd as u8).collect()
+    }
+
+    /// 1 for fills drawn over the lines (wipeouts), 0 for the rest.
+    #[wasm_bindgen(js_name = fillMasks)]
+    pub fn fill_masks(&self) -> Vec<u8> {
+        self.drawing.fills.iter().map(|f| f.mask as u8).collect()
+    }
+
+    /// Six numbers per fill: gradient kind (0 none, 1 linear, 2 radial), points a and b (see
+    /// `dxf::Gradient`), and its number of stops in `fillGradientStops()`.
+    #[wasm_bindgen(js_name = fillGradients)]
+    pub fn fill_gradients(&self) -> Vec<f64> {
+        let geometry = |g: &dxf::Gradient| [if g.radial { 2.0 } else { 1.0 }, g.a[0], g.a[1], g.b[0], g.b[1], g.stops.len() as f64];
+        self.drawing.fills.iter().flat_map(|f| f.gradient.as_ref().map_or([0.0; 6], geometry)).collect()
+    }
+
+    /// Offset and colour of each gradient stop, fill after fill.
+    #[wasm_bindgen(js_name = fillGradientStops)]
+    pub fn fill_gradient_stops(&self) -> Vec<f64> {
+        self.drawing.fills.iter().filter_map(|f| f.gradient.as_ref()).flat_map(|g| g.stops.iter().flat_map(|&(t, c)| [t, c as f64])).collect()
     }
 
     /// The page as top-left x, y, width and height, or empty if there is none.
@@ -317,10 +348,22 @@ impl DxfDoc {
         self.drawing.texts.iter().map(|t| t.fit).collect()
     }
 
+    /// Width each text's lines are word-wrapped at, in drawing units; 0 for none.
+    #[wasm_bindgen(js_name = textWraps)]
+    pub fn text_wraps(&self) -> Vec<f64> {
+        self.drawing.texts.iter().map(|t| t.wrap).collect()
+    }
+
     /// Font of each text: family (0 sans-serif, 1 serif, 2 monospace) plus 4 for italic and 8 for bold.
     #[wasm_bindgen(js_name = textFonts)]
     pub fn text_fonts(&self) -> Vec<u8> {
         self.drawing.texts.iter().map(|t| t.font).collect()
+    }
+
+    /// Two numbers per text: background mask colour (-1 for none) and how far it reaches beyond the text, in drawing units.
+    #[wasm_bindgen(js_name = textMasks)]
+    pub fn text_masks(&self) -> Vec<f64> {
+        self.drawing.texts.iter().flat_map(|t| t.mask.map_or([-1.0, 0.0], |(c, margin)| [c as f64, margin])).collect()
     }
 
     #[wasm_bindgen(js_name = textColors)]

@@ -57,7 +57,7 @@
       [hidden] { display: none !important; }
       /* Visible overflow: at fractional positions the box would clip the shapes' anti-aliased edges. */
       svg.icon { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; overflow: visible; }
-      :is(#toolbar, #find-bar) svg.icon { width: 16px; height: 16px; }
+      :is(#toolbar, #find-bar, #measure-bar) svg.icon { width: 16px; height: 16px; }
       #toolbar svg.icon { width: 21px; height: 21px; }
 
       /* Floating translucent material for all chrome. */
@@ -158,8 +158,8 @@
         #toolbar { left: 12px; transform: none; }
       }
 
-      /* Find bar: rises above the toolbar it came from. */
-      #find-bar {
+      /* Find and measure bars: rise above the toolbar they came from. */
+      #find-bar, #measure-bar {
         position: fixed;
         bottom: 72px;
         left: 50%;
@@ -176,7 +176,15 @@
         transition: transform 300ms var(--ease-out), opacity 200ms ease-out, visibility 0s 300ms;
         z-index: 2;
       }
-      #find-bar.open { transform: translate(-50%, 0); opacity: 1; visibility: visible; transition: transform 300ms var(--ease-out), opacity 200ms ease-out; }
+      #measure-bar { width: auto; max-width: calc(100vw - 24px); }
+      /* With both open, measuring sits above find. */
+      #find-bar.open ~ #measure-bar { bottom: 124px; }
+      #measure-bar .group + .group { margin-left: 4px; padding-left: 4px; }
+      #measure-hint { padding: 0 8px; color: var(--muted); white-space: nowrap; }
+      @media (hover: none), (max-width: 480px) {
+        #measure-hint { display: none; }
+      }
+      :is(#find-bar, #measure-bar).open { transform: translate(-50%, 0); opacity: 1; visibility: visible; transition: transform 300ms var(--ease-out), opacity 200ms ease-out; }
       #find-bar input { flex: 1; min-width: 0; }
       #find-count { min-width: 56px; padding: 0 8px 0 12px; color: var(--muted); font-variant-numeric: tabular-nums; text-align: center; }
 
@@ -383,6 +391,7 @@
       <symbol id="i-fit" viewBox="0 0 24 24"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2" /></symbol>
       <symbol id="i-invert" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><path d="M12 18a6 6 0 0 0 0-12v12z" /></symbol>
       <symbol id="i-grid" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" /><path d="M3 9h18M3 15h18M9 3v18M15 3v18" /></symbol>
+      <symbol id="i-weights" viewBox="0 0 24 24"><path d="M3 5h18" /><path d="M3 11h18" stroke-width="3" /><path d="M3 18h18" stroke-width="5" /></symbol>
       <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z" /><path d="M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12" /><path d="M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17" /></symbol>
       <symbol id="i-ruler" viewBox="0 0 24 24"><path d="M21.3 15.3a2.4 2.4 0 0 1 0 3.4l-2.6 2.6a2.4 2.4 0 0 1-3.4 0L2.7 8.7a2.41 2.41 0 0 1 0-3.4l2.6-2.6a2.41 2.41 0 0 1 3.4 0Z" /><path d="m14.5 12.5 2-2M11.5 9.5l2-2M8.5 6.5l2-2M17.5 15.5l2-2" /></symbol>
       <symbol id="i-export" viewBox="0 0 24 24"><path d="M10.3 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v10l-3.1-3.1a2 2 0 0 0-2.814.014L6 21" /><path d="m14 19 3 3v-5.5M17 22l3-3" /><circle cx="9" cy="9" r="2" /></symbol>
@@ -437,9 +446,10 @@
       <div class="group doc">
         <button id="invert" title="Paper: dark blue, white, black" aria-label="Paper colour" aria-pressed="false"><svg class="icon"><use href="#i-invert" /></svg></button>
         <button id="grid" title="Grid" aria-label="Grid" aria-pressed="false" hidden><svg class="icon"><use href="#i-grid" /></svg></button>
+        <button id="weights" title="Line weights" aria-label="Line weights" aria-pressed="false" hidden><svg class="icon"><use href="#i-weights" /></svg></button>
         <button id="layers" title="Layers" aria-label="Layers" aria-pressed="false" hidden><svg class="icon"><use href="#i-layers" /></svg></button>
         <button id="find" title="Find text" aria-label="Find text" aria-pressed="false" hidden><svg class="icon"><use href="#i-search" /></svg></button>
-        <button id="measure" title="Measure distance" aria-label="Measure" aria-pressed="false"><svg class="icon"><use href="#i-ruler" /></svg></button>
+        <button id="measure" title="Measure" aria-label="Measure" aria-pressed="false"><svg class="icon"><use href="#i-ruler" /></svg></button>
         <button id="export" title="Save view as PNG" aria-label="Save view as PNG"><svg class="icon"><use href="#i-export" /></svg></button>
         <button id="info" title="File information" aria-label="File information"><svg class="icon"><use href="#i-info" /></svg></button>
         <button id="keys" title="Keyboard shortcuts" aria-label="Keyboard shortcuts"><svg class="icon"><use href="#i-keys" /></svg></button>
@@ -457,6 +467,19 @@
       <button id="find-prev" title="Previous match (Shift-Enter)" aria-label="Previous match"><svg class="icon"><use href="#i-up" /></svg></button>
       <button id="find-next" title="Next match (Enter)" aria-label="Next match"><svg class="icon"><use href="#i-down" /></svg></button>
       <button id="find-close" title="Done (Esc)" aria-label="Close find"><svg class="icon"><use href="#i-close" /></svg></button>
+    </div>
+
+    <div id="measure-bar" class="glass" role="toolbar" aria-label="Measure" inert>
+      <div class="group">
+        <button id="measure-distance" class="text-button" title="Measure distance" aria-pressed="false">Distance</button>
+        <button id="measure-angle" class="text-button" title="Measure angle: arm, vertex, arm" aria-pressed="false">Angle</button>
+      </div>
+      <div class="group">
+        <button id="measure-keep" class="text-button" title="Keep finished measurements on the drawing" aria-pressed="false">Keep</button>
+        <button id="measure-clear" class="text-button" title="Remove kept measurements">Clear</button>
+        <span id="measure-hint">Hold Shift: no snap</span>
+        <button id="measure-close" title="Done (Esc)" aria-label="Stop measuring"><svg class="icon"><use href="#i-close" /></svg></button>
+      </div>
     </div>
 
     <aside id="layers-panel" class="glass" aria-label="Layers" inert>

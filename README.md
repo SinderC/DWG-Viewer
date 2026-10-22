@@ -7,10 +7,13 @@ the built page's Content-Security-Policy blocks all network access. Supported fo
 - **TIFF**: black/white (CCITT G4, PackBits, uncompressed) and grey/colour (LZW, Deflate, JPEG,
   PackBits, uncompressed), including multi-page files. Colour images are limited to 200 megapixels.
 - **DXF** (ASCII, model space): lines, rays and construction lines, polylines with arcs and
-  widths, circles, arcs, ellipses, splines, points, SOLID/TRACE/3DFACE outlines, hatches (solid and
-  patterned; gradients in their first colour), TEXT/MTEXT/attributes, leaders and multileaders,
-  nested blocks and dimensions, in layer and entity colours and linetypes (complex linetypes are
-  drawn solid). Not drawn: line weights, images, 3D meshes, binary DXF.
+  widths, circles, arcs, ellipses, splines, helices, points, filled SOLID/TRACE, 3DFACE outlines,
+  hatches (solid, patterned and gradient), wipeouts, TEXT/MTEXT (inline formatting, stacked
+  fractions, background masks) and attributes, leaders and multileaders, multilines, tables,
+  tolerances, nested blocks and dimensions (drawn from their points when the block is missing),
+  polyface/polygon meshes and MESH, 3DSOLID/BODY/REGION as a top-view wireframe, in layer and entity
+  colours, linetypes and line weights (shown with the line-weight toggle). Not drawn: transparency,
+  images, binary DXF.
 - **DWG** R13 to 2018+ (read with the `acadrust` crate): the same model-space entities as DXF.
   R12 and older DWG files are not supported.
 - **HP-GL, HP-GL/2 and HP RTL** plot files (`.plt`, `.hpgl`, …), plain or wrapped in PCL/PJL: lines,
@@ -48,6 +51,8 @@ To use it offline, save the page (File → Save Page As) — it is a single self
 - **Info:** file properties — size, resolution, compression and tags (TIFF), header records (CALS),
   version, units, layers and entities not drawn (DXF/DWG), language, plot size, pens and raster images (HP-GL),
   version, sheet, paper size and metadata (DWF), version, description, fonts, picture and scale (CGM)
+- **Line weights:** draws DXF/DWG line weights above 0.25 mm at their size on screen, as AutoCAD's
+  LWDISPLAY does; off by default
 - **Layers:** show or hide DXF/DWG/DWF/WebCGM layers or HP-GL pens, with a name filter and All on / All off; Alt-click shows
   only that layer. Layers that are off or frozen in the file start hidden.
 
@@ -75,6 +80,7 @@ cargo run --release --example make_sample -- samples/test.cal 18000 12700 090,27
 cargo run --release --example dxf_to_dwg -- samples/in.dxf samples/out.dwg AC1018    # DWG from a DXF (acadrust)
 cargo run --release --example make_dwf -- samples                                   # synthetic DWF (classic, 6.0) and DWFx files
 cargo run --release --example make_cgm -- samples                                   # synthetic binary CGM files
+cargo run --release --example extend_baseline -- samples/in.dwg samples/out.dwg      # copy of a DXF/DWG plus a grid of extra entity types
 ```
 
 ## Layout
