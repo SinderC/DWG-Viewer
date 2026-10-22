@@ -219,16 +219,16 @@ export class Viewer {
   }
 
   /**
-   * Range of the drawing point at the canvas centre (see `params`), at `scale`. A drawing that fits the
-   * canvas stays centred above the toolbar, as fitted; a larger one may bring its edges in, clear of the
-   * floating chrome, by up to a quarter of the canvas.
+   * Range of the drawing point at the canvas centre (see `params`), at `scale`. Along each axis, a
+   * quarter of the drawing, or of the canvas if that is smaller, stays on screen; the fitted view is
+   * always within range.
    */
   private centreLimits(scale: number): [number, number][] {
     const { width, height } = this.doc!;
     const bottom = FIT_BOTTOM * (window.devicePixelRatio || 1);
     const range = (size: number, visible: number, mid: number): [number, number] => {
-      const margin = Math.min(visible / 4, Math.max(0, size - visible) / 2);
-      return [Math.min(mid, visible / 2 - margin), Math.max(mid, size - visible / 2 + margin)];
+      const kept = Math.min(size, visible) / 4;
+      return [Math.min(mid, kept - visible / 2), Math.max(mid, size - kept + visible / 2)];
     };
     const w = this.canvas.width / scale;
     const h = this.canvas.height / scale;
