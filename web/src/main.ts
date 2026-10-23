@@ -44,23 +44,26 @@ $('formats').replaceChildren(
 const measureButton = $('measure');
 const measureBar = $('measure-bar');
 const measureKeep = $('measure-keep');
-const toolButtons = { distance: $('measure-distance'), angle: $('measure-angle') };
+const toolButtons = { distance: $('measure-distance'), angle: $('measure-angle'), area: $('measure-area') };
 
 type Point = { x: number; y: number };
-type Tool = 'distance' | 'angle';
-/** Points in drawing coordinates: two for a distance; arm, vertex and arm for an angle. */
+type Tool = 'distance' | 'angle' | 'area';
+/** Points in drawing coordinates: two for a distance; arm, vertex and arm for an angle; the corners of an area. */
 type Measurement = { kind: Tool; points: Point[] };
-const POINTS: Record<Tool, number> = { distance: 2, angle: 3 };
+/** Points that finish a measurement; an area is finished by hand instead. */
+const POINTS: Record<Tool, number> = { distance: 2, angle: 3, area: Infinity };
 
 /**
- * Measure tool: the tool in use, the points placed so far, the pointer while placing the next one and
- * the drawing point it snapped to. With `keep`, finished measurements go to `kept` and stay on screen.
+ * Measure tool: the tool in use, the points placed so far, whether they are finished, the pointer while
+ * placing the next one and the drawing point it snapped to. With `keep`, finished measurements go to
+ * `kept` and stay on screen.
  */
 const measure = {
   tool: null as Tool | null,
   keep: false,
   kept: [] as Measurement[],
   points: [] as Point[],
+  done: false,
   hover: null as Point | null,
   snapped: null as SnapPoint | null,
 };
@@ -90,8 +93,16 @@ function paintMeasurement(ctx: CanvasRenderingContext2D, doc: DrawingDocument, k
   ctx.strokeStyle = ACCENT;
   ctx.beginPath();
   s.forEach(([x, y]) => ctx.lineTo(x, y));
+  if (kind === 'area' && s.length > 2) {
+    ctx.closePath();
+    ctx.fillStyle = `${ACCENT}26`;
+    ctx.fill();
+  }
   ctx.stroke();
-  if (kind === 'angle' && s.length === 3) {
+  if (kind === 'area' && s.length > 2) {
+    const mean = (i: 0 | 1) => s.reduce((sum, q) => sum + q[i], 0) / s.length;
+    label(ctx, areaText(doc, p), mean(0), mean(1), dpr);
+  } else if (kind === 'angle' && s.length === 3) {
     // The arc sweeps the inner angle, from arm a to arm c about vertex b.
     const [[ax, ay], [bx, by], [cx, cy]] = s;
     const [ta, tc] = [Math.atan2(ay - by, ax - bx), Math.atan2(cy - by, cx - bx)];
@@ -159,6 +170,26 @@ function distanceText(doc: DrawingDocument, a: Point, b: Point): string {
   return doc.dpi ? `${px} · ${number((length / doc.dpi) * 25.4, 4)} mm · ${angle}` : `${px} · ${angle}`;
 }
 
+/** Enclosed area and perimeter of the closed polygon `p`, in the document's units. */
+function areaText(doc: DrawingDocument, p: Point[]): string {
+  let area = 0;
+  let perimeter = 0;
+  p.forEach((a, i) => {
+    const b = p[(i + 1) % p.length];
+    area += a.x * b.y - b.x * a.y;
+    perimeter += Math.hypot(b.x - a.x, b.y - a.y);
+  });
+  area = Math.abs(area) / 2;
+  if (doc.kind === 'vector') {
+    const unit = (power: string) => (doc.units ? ` ${doc.units}${power}` : '');
+    return `${number(area)}${unit('²')} · perimeter ${number(perimeter)}${unit('')}`;
+  }
+  const px = `${number(area, 4)} px² · perimeter ${number(perimeter, 4)} px`;
+  if (!doc.dpi) return px;
+  const mm = 25.4 / doc.dpi;
+  return `${px} · ${number(area * mm * mm, 4)} mm² · ${number(perimeter * mm, 4)} mm`;
+}
+
 /**
  * The point to place for pointer position `p` (with `pixel`, a CSS pixel in drawing units): a drawing point
  * near it, or else on the horizontal or vertical through the last point placed if the line is nearly so.
@@ -167,6 +198,11 @@ function distanceText(doc: DrawingDocument, a: Point, b: Point): string {
 function snap(p: Point, pixel: number, free: boolean): { point: Point; snapped: SnapPoint | null } {
   const doc = current?.doc;
   if (free || !doc) return { point: p, snapped: null };
+  // An area closes on its first corner.
+  const first = measure.points[0];
+  if (measure.tool === 'area' && measure.points.length > 2 && Math.hypot(p.x - first.x, p.y - first.y) <= SNAP_PX * pixel) {
+    return { point: first, snapped: { ...first, kind: 'end' } };
+  }
   const snapped = doc.kind === 'vector' ? doc.snap(p.x, p.y, SNAP_PX * pixel) : null;
   if (snapped) return { point: snapped, snapped };
   const last = measure.points.at(-1);
@@ -182,12 +218,36 @@ function snap(p: Point, pixel: number, free: boolean): { point: Point; snapped: 
 function setTool(tool: Tool | null): void {
   measure.tool = tool;
   measure.points = [];
+  measure.done = false;
   measure.hover = measure.snapped = null;
   measureButton.setAttribute('aria-pressed', String(!!tool));
   for (const [kind, button] of Object.entries(toolButtons)) button.setAttribute('aria-pressed', String(kind === tool));
   measureBar.classList.toggle('open', !!tool);
   measureBar.inert = !tool;
   canvas.classList.toggle('measuring', !!tool);
+  viewer.redrawOverlay();
+}
+
+/** Finishes the measurement being placed: kept, or left on screen until the next click. */
+function finish(): void {
+  if (measure.keep) {
+    measure.kept.push({ kind: measure.tool!, points: measure.points });
+    measure.points = [];
+  } else measure.done = true;
+  measure.hover = measure.snapped = null;
+  viewer.redrawOverlay();
+}
+
+/** Closes the area being placed, if it has corners enough. */
+function finishArea(): void {
+  if (measure.tool === 'area' && !measure.done && measure.points.length > 2) finish();
+}
+
+/** Removes the last point placed. */
+function undoPoint(): void {
+  if (measure.done || !measure.points.length) return;
+  measure.points.pop();
+  hover();
   viewer.redrawOverlay();
 }
 
@@ -461,6 +521,7 @@ function showPage(file: OpenFile, page: number): void {
     showLayers(layers);
     syncLayers();
     measure.points = [];
+    measure.done = false;
     measure.hover = measure.snapped = null;
     measure.kept = [];
     findButton.hidden = gridButton.hidden = doc.kind !== 'vector';
@@ -536,7 +597,7 @@ let pointer: { clientX: number; clientY: number; shiftKey: boolean } | null = nu
 function hover(): void {
   if (!measure.tool || !pointer) return;
   // A finished measurement that is not kept stays on screen until the next click.
-  if (measure.points.length === POINTS[measure.tool]) return;
+  if (measure.done) return;
   const p = viewer.toDrawing(pointer);
   ({ point: measure.hover, snapped: measure.snapped } = snap(p, p.pixel, pointer.shiftKey));
   viewer.redrawOverlay();
@@ -564,25 +625,32 @@ for (const type of ['keydown', 'keyup'] as const) {
 viewer.onTap = (e) => {
   const tool = measure.tool;
   if (!tool) return;
-  if (measure.points.length === POINTS[tool]) measure.points = [];
-  const p = viewer.toDrawing(e);
-  measure.points.push(snap(p, p.pixel, e.shiftKey).point);
-  measure.hover = measure.snapped = null;
-  if (measure.points.length === POINTS[tool] && measure.keep) {
-    measure.kept.push({ kind: tool, points: measure.points });
+  if (measure.done) {
     measure.points = [];
+    measure.done = false;
   }
+  const p = viewer.toDrawing(e);
+  const point = snap(p, p.pixel, e.shiftKey).point;
+  const last = measure.points.at(-1);
+  // The second click of a double click lands where the first did, and only closes the area.
+  if (tool === 'area' && last && Math.hypot(point.x - last.x, point.y - last.y) <= 4 * p.pixel) return;
+  if (tool === 'area' && point === measure.points[0]) return finishArea();
+  measure.points.push(point);
+  measure.hover = measure.snapped = null;
+  if (measure.points.length === POINTS[tool]) return finish();
   viewer.redrawOverlay();
 };
 measureButton.addEventListener('click', () => setTool(measure.tool ? null : 'distance'));
 toolButtons.distance.addEventListener('click', () => setTool('distance'));
 toolButtons.angle.addEventListener('click', () => setTool('angle'));
+toolButtons.area.addEventListener('click', () => setTool('area'));
 measureKeep.addEventListener('click', () => setKeep(!measure.keep));
 $('measure-clear').addEventListener('click', clearMeasurements);
 $('measure-close').addEventListener('click', () => setTool(null));
 // While measuring, a double click is two points, not a request to fit.
 canvas.addEventListener('dblclick', () => {
   if (!measure.tool) viewer.fit();
+  finishArea();
 });
 
 /** Saves the view as shown, measurements included, as a PNG next to the file's name. */
@@ -681,6 +749,9 @@ const shortcuts: Shortcut[] = [
   { keys: ['Mod+f'], label: 'Find text', run: () => toggleFind(true), when: () => !findButton.hidden, button: 'find' },
   { keys: ['m'], label: 'Measure distance', run: () => setTool(measure.tool === 'distance' ? null : 'distance'), button: 'measure' },
   { keys: ['a'], label: 'Measure angle', run: () => setTool(measure.tool === 'angle' ? null : 'angle'), button: 'measure-angle' },
+  { keys: ['r'], label: 'Measure area', run: () => setTool(measure.tool === 'area' ? null : 'area'), button: 'measure-area' },
+  { keys: ['Enter'], label: 'Close the area', run: finishArea, when: () => measure.tool === 'area' && !measure.done && measure.points.length > 2 },
+  { keys: ['Backspace'], label: 'Remove the last point', run: undoPoint, when: () => !!measure.tool && !measure.done && measure.points.length > 0 },
   { keys: ['Escape'], label: 'Stop measuring', run: () => setTool(null), when: () => !!measure.tool },
   { keys: ['?'], label: 'Keyboard shortcuts', run: () => keysDialog.showModal(), when: always, button: 'keys' },
 ];

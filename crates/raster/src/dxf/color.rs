@@ -5,6 +5,29 @@ pub const FOREGROUND: u32 = 0x0100_0000;
 /// The paper colour: white on white paper, black on black. Used for erasing (e.g. HP-GL pen 0).
 pub const BACKGROUND: u32 = 0x0200_0000;
 
+/// Bits 26–31 of a colour: its transparency, 0 (opaque) to 63 (clear), so it travels with the colour.
+const TRANSPARENCY: u32 = 0xFC00_0000;
+
+/// `color` with transparency `t`, 0 (opaque) to 255 (clear).
+pub fn with_transparency(color: u32, t: u8) -> u32 {
+    color & !TRANSPARENCY | (t as u32 >> 2) << 26
+}
+
+/// `rgb` with the transparency of `color`.
+pub fn transparency_of(color: u32, rgb: u32) -> u32 {
+    rgb & !TRANSPARENCY | color & TRANSPARENCY
+}
+
+/// Transparency 0 (opaque) to 255 (clear) of a DXF group 440 value: BYLAYER (`by_layer`),
+/// BYBLOCK (`by_block`), or 0x02 in the top byte and the alpha (255 opaque) in the low byte.
+pub fn transparency(value: i64, by_layer: u8, by_block: u8) -> u8 {
+    match value >> 24 & 0xFF {
+        1 => by_block,
+        2 | 3 => 255 - (value & 0xFF) as u8,
+        _ => by_layer,
+    }
+}
+
 /// ACI 1–255 as 0xRRGGBB, or `FOREGROUND` for 7. Out-of-range indices are treated as 7.
 pub fn aci(index: i64) -> u32 {
     const BASIC: [u32; 9] = [0xFF0000, 0xFFFF00, 0x00FF00, 0x00FFFF, 0x0000FF, 0xFF00FF, FOREGROUND, 0x808080, 0xC0C0C0];
@@ -48,5 +71,16 @@ mod tests {
         assert_eq!(aci(30), 0xFF7F00);
         assert_eq!(aci(140), 0x00BFFF);
         assert_eq!(aci(250), 0x333333);
+    }
+
+    #[test]
+    fn transparency_values() {
+        assert_eq!(transparency(0, 10, 20), 10);
+        assert_eq!(transparency(0x0100_0000, 10, 20), 20);
+        assert_eq!(transparency(0x0200_00FF, 10, 20), 0);
+        assert_eq!(transparency(0x0200_0033, 10, 20), 204);
+        let c = with_transparency(FOREGROUND, 128);
+        assert_eq!((c >> 26, c & !TRANSPARENCY), (32, FOREGROUND));
+        assert_eq!(transparency_of(c, 0xFF0000), 0xFF0000 | 32 << 26);
     }
 }

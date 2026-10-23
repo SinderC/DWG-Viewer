@@ -160,10 +160,15 @@ interface Image {
   layer: number;
 }
 
+/** Bits 26–31 of a DXF colour: its transparency, 0 (opaque) to 63 (clear). */
+const TRANSPARENCY = 0xfc000000;
+
 /** CSS colour for a DXF colour on white paper, or on black when `invert` is set. */
 function css(color: number, invert: boolean): string {
-  if (color === FOREGROUND) return invert ? '#fff' : '#000';
-  if (color === BACKGROUND) return invert ? '#000' : '#fff';
+  const transparency = color >>> 26;
+  if (transparency) return css(color & ~TRANSPARENCY, invert).replace(')', ` / ${1 - transparency / 63})`);
+  if (color === FOREGROUND) return invert ? 'rgb(255 255 255)' : 'rgb(0 0 0)';
+  if (color === BACKGROUND) return invert ? 'rgb(0 0 0)' : 'rgb(255 255 255)';
   let rgb = [(color >> 16) & 255, (color >> 8) & 255, color & 255];
   const luma = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2];
   if (!invert && luma > MAX_LUMA_ON_WHITE) {
@@ -529,7 +534,7 @@ function drawRich(ctx: CanvasRenderingContext2D, t: Text, px: number, invert: bo
       const h = px * height;
       const [style, family] = runFont(run, t.style, t.family);
       const font = (size: number) => (ctx.font = `${style}${size * EM_PER_CAP}px ${family}`);
-      ctx.fillStyle = css(color < 0 ? t.color : color, invert);
+      ctx.fillStyle = css(color < 0 ? t.color : color | (t.color & TRANSPARENCY), invert);
       ctx.save();
       // Width factor along the baseline; oblique leans glyphs to the right as they rise (glyph y is down).
       ctx.transform(stretch, 0, -Math.tan((oblique * Math.PI) / 180), 1, x, y);
