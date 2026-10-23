@@ -3,7 +3,8 @@
 Offline, browser-only viewer for engineering drawings (CALS raster, TIFF, DXF, DWG). Rust decodes and
 renders to WASM; a small TypeScript front end draws to a canvas. The build is one self-contained HTML file.
 
-See `README.md` for supported formats, toolchain setup, and project layout.
+See `README.md` and `docs/` (`formats.md`, `usage.md`, `development.md`) for supported formats,
+toolchain setup, and project layout.
 
 ## Commands
 
@@ -38,4 +39,4 @@ cargo test      # Rust unit tests
 
 - Work on `dev`; PRs go `dev` → `main`. Pushing to `main` deploys to GitHub Pages.
 - Test files go in `./samples/` (git-ignored). Generate a synthetic one with the `make_sample`
-  example from the README.
+  example in `docs/development.md`.
